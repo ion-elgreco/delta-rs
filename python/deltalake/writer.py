@@ -35,7 +35,7 @@ import pyarrow.dataset as ds
 import pyarrow.fs as pa_fs
 from pyarrow.lib import RecordBatchReader
 
-from deltalake.schema import delta_arrow_schema_from_pandas, delta_arrow_schema_adjusted
+from deltalake.schema import delta_arrow_schema_adjusted, delta_arrow_schema_from_pandas
 
 from ._internal import DeltaDataChecker as _DeltaDataChecker
 from ._internal import batch_distinct

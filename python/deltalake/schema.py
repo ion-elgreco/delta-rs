@@ -49,8 +49,8 @@ def delta_arrow_schema_from_pandas(
 
 
 def delta_arrow_schema_adjusted(
-    data: Union[pa.Table, pa.RecordBatch,RecordBatchReader]
-) -> Tuple[Union[pa.Table,None], pa.Schema]:
+    data: Union[pa.Table, pa.RecordBatch, RecordBatchReader]
+) -> Tuple[Union[pa.Table, None], pa.Schema]:
     """
     Infers the schema for the delta table from arrow table/dataset
     Necessary because of issues such as:  https://github.com/delta-io/delta-rs/issues/1467
