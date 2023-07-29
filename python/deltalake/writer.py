@@ -35,7 +35,7 @@ import pyarrow.dataset as ds
 import pyarrow.fs as pa_fs
 from pyarrow.lib import RecordBatchReader
 
-from deltalake.schema import delta_arrow_schema_from_pandas
+from deltalake.schema import delta_arrow_schema_from_pandas, delta_arrow_schema_adjusted
 
 from ._internal import DeltaDataChecker as _DeltaDataChecker
 from ._internal import batch_distinct
@@ -145,6 +145,12 @@ def write_deltalake(
         else:
             data, schema = delta_arrow_schema_from_pandas(data)
 
+    if isinstance(data, pa.Table):
+        if schema is not None:
+            data = data.cast(target_schema=schema)
+        else:
+            data, schema = delta_arrow_schema_adjusted(data)
+
     table, table_uri = try_get_table_and_table_uri(table_or_uri, storage_options)
 
     # We need to write against the latest table version
@@ -153,7 +159,9 @@ def write_deltalake(
 
     if schema is None:
         if isinstance(data, RecordBatchReader):
-            schema = data.schema
+            _, schema = delta_arrow_schema_adjusted(data)
+        elif isinstance(data, pa.RecordBatch):
+            _, schema = delta_arrow_schema_adjusted(data)
         elif isinstance(data, Iterable):
             raise ValueError("You must provide schema if data is Iterable")
         else:
