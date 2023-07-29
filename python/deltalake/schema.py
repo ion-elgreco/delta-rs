@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Tuple, Union
 
 import pyarrow as pa
+from pyarrow.lib import RecordBatchReader
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -45,3 +46,35 @@ def delta_arrow_schema_from_pandas(
     schema = pa.schema(schema_out, metadata=schema.metadata)
     data = pa.Table.from_pandas(data, schema=schema)
     return data, schema
+
+
+def delta_arrow_schema_adjusted(
+    data: Union[pa.Table, pa.RecordBatch,RecordBatchReader]
+) -> Tuple[Union[pa.Table,None], pa.Schema]:
+    """
+    Infers the schema for the delta table from arrow table/dataset
+    Necessary because of issues such as:  https://github.com/delta-io/delta-rs/issues/1467
+
+    :param data: Data to write.
+    :return: A PyArrow Table and the inferred schema for the Delta Table
+    """
+
+    schema = data.schema
+    schema_out = []
+    for field in schema:
+        if isinstance(field.type, pa.TimestampType):
+            f = pa.field(
+                name=field.name,
+                type=pa.timestamp("us"),
+                nullable=field.nullable,
+                metadata=field.metadata,
+            )
+            schema_out.append(f)
+        else:
+            schema_out.append(field)
+    schema = pa.schema(schema_out, metadata=schema.metadata)
+    if isinstance(data, pa.Table):
+        data = data.cast(target_schema=schema)
+        return data, schema
+    else:
+        return None, schema
