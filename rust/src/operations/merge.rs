@@ -16,8 +16,9 @@
 //! ```rust ignore
 //! let table = open_table("../path/to/table")?;
 //! let (table, metrics) = DeltaOps(table)
-//!     .merge(source, col("id").eq(col("source.id")))
+//!     .merge(source, col("target.id").eq(col("source.id")))
 //!     .with_source_alias("source")
+//!     .with_target_alias("target")
 //!     .when_matched_update(|update| {
 //!         update
 //!             .update("value", col("source.value") + lit(1))
@@ -156,8 +157,9 @@ impl MergeBuilder {
     /// ```rust ignore
     /// let table = open_table("../path/to/table")?;
     /// let (table, metrics) = DeltaOps(table)
-    ///     .merge(source, col("id").eq(col("source.id")))
+    ///     .merge(source, col("target.id").eq(col("source.id")))
     ///     .with_source_alias("source")
+    ///     .with_target_alias("target")
     ///     .when_matched_update(|update| {
     ///         update
     ///             .predicate(col("source.value").lt(lit(0)))
@@ -193,8 +195,9 @@ impl MergeBuilder {
     /// ```rust ignore
     /// let table = open_table("../path/to/table")?;
     /// let (table, metrics) = DeltaOps(table)
-    ///     .merge(source, col("id").eq(col("source.id")))
+    ///     .merge(source, col("target.id").eq(col("source.id")))
     ///     .with_source_alias("source")
+    ///     .with_target_alias("target")
     ///     .when_matched_delete(|delete| {
     ///         delete.predicate(col("source.delete"))
     ///     })?
@@ -225,8 +228,9 @@ impl MergeBuilder {
     /// ```rust ignore
     /// let table = open_table("../path/to/table")?;
     /// let (table, metrics) = DeltaOps(table)
-    ///     .merge(source, col("id").eq(col("source.id")))
+    ///     .merge(source, col("target.id").eq(col("source.id")))
     ///     .with_source_alias("source")
+    ///     .with_target_alias("target")
     ///     .when_not_matched_insert(|insert| {
     ///         insert
     ///             .set("id", col("source.id"))
@@ -259,8 +263,9 @@ impl MergeBuilder {
     /// ```rust ignore
     /// let table = open_table("../path/to/table")?;
     /// let (table, metrics) = DeltaOps(table)
-    ///     .merge(source, col("id").eq(col("source.id")))
+    ///     .merge(source, col("target.id").eq(col("source.id")))
     ///     .with_source_alias("source")
+    ///     .with_target_alias("target")
     ///     .when_not_matched_by_source_update(|update| {
     ///         update
     ///             .update("active", lit(false))
@@ -290,8 +295,9 @@ impl MergeBuilder {
     /// ```rust ignore
     /// let table = open_table("../path/to/table")?;
     /// let (table, metrics) = DeltaOps(table)
-    ///     .merge(source, col("id").eq(col("source.id")))
+    ///     .merge(source, col("target.id").eq(col("source.id")))
     ///     .with_source_alias("source")
+    ///     .with_target_alias("target")
     ///     .when_not_matched_by_source_delete(|delete| {
     ///         delete
     ///     })?
@@ -435,7 +441,7 @@ enum OperationType {
     Copy,
 }
 
-//TODO: Think of a better name for this. Purpose is to encapsulate expressions until after execute is called.
+//Encapsute the User's Merge configuration for later processing
 struct MergeOperationConfig {
     /// Which records to update
     predicate: Option<Expression>,
@@ -808,16 +814,19 @@ async fn execute(
         let mut when_expr = Vec::with_capacity(operations_size);
         let mut then_expr = Vec::with_capacity(operations_size);
 
+        let qualifier = match &target_alias {
+            Some(alias) => Some(TableReference::Bare {
+                table: alias.to_owned().into(),
+            }),
+            None => TableReference::none(),
+        };
+        let column = project_schema_df.field_with_name(qualifier.as_ref(), field.get_name())?;
+
         for (idx, (operations, _)) in ops.iter().enumerate() {
             let op = operations
                 .get(&field.get_name().to_owned().into())
                 .map(|expr| expr.to_owned())
-                .unwrap_or_else(|| match &target_alias {
-                    Some(alias) => col(Column::from_qualified_name(
-                        alias.to_string() + "." + field.get_name(),
-                    )),
-                    None => col(field.get_name()),
-                });
+                .unwrap_or_else(|| col(Column::new(qualifier.clone(), field.get_name())));
 
             when_expr.push(lit(idx as i32));
             then_expr.push(op);
@@ -840,10 +849,10 @@ async fn execute(
 
         projection_map.insert(field.get_name(), expressions.len());
         let name = "__delta_rs_c_".to_owned() + field.get_name();
-        //TODO: datatype sould not matter...
+
         f.push(DFField::new_unqualified(
             &name,
-            arrow_schema::DataType::Utf8,
+            column.data_type().clone(),
             true,
         ));
         expressions.push((case, name));
@@ -1360,6 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_str() {
+        // Validate that users can use string predicates
         let (mut table, metrics) = setup_op()
             .await
             .when_matched_update(|update| {
