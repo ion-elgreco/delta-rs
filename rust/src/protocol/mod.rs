@@ -829,6 +829,19 @@ pub enum DeltaOperation {
         ///Datetime to restore
         datetime: Option<i64>,
     }, // TODO: Add more operations
+
+
+    // /// Represents a `Alter` operation
+    // Alter {
+    //     /// Updated metadata associated with the table
+    //     SetTableProperties {
+    //         metadata: DeltaTableMetaData,
+    //     },
+    //     /// Remove metadata associated with the table
+    //     UnSetTableProperties {
+    //         metadata: DeltaTableMetaData,
+    //     }
+    // }, 
 }
 
 impl DeltaOperation {
@@ -849,6 +862,8 @@ impl DeltaOperation {
             DeltaOperation::Optimize { .. } => "OPTIMIZE",
             DeltaOperation::FileSystemCheck { .. } => "FSCK",
             DeltaOperation::Restore { .. } => "RESTORE",
+            // DeltaOperation::Alter::SetTableProperties { .. } => "SET TBLPROPERTIES",
+            // DeltaOperation::Alter::UnSetTableProperties { .. } => "UNSET TBLPROPERTIES",
         }
     }
 
