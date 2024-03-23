@@ -55,6 +55,7 @@ use datafusion_expr::{
     UserDefinedLogicalNode, UNNAMED_TABLE,
 };
 use futures::future::BoxFuture;
+use futures::TryFutureExt;
 use itertools::Itertools;
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
@@ -458,6 +459,7 @@ enum OperationType {
 }
 
 //Encapsute the User's Merge configuration for later processing
+#[derive(Debug, Clone)]
 struct MergeOperationConfig {
     /// Which records to update
     predicate: Option<Expression>,
@@ -466,6 +468,7 @@ struct MergeOperationConfig {
     r#type: OperationType,
 }
 
+#[derive(Debug, Clone)]
 struct MergeOperation {
     /// Which records to update
     predicate: Option<Expr>,
@@ -948,6 +951,11 @@ async fn execute(
     let mut metrics = MergeMetrics::default();
     let exec_start = Instant::now();
 
+    dbg!(match_operations.clone());
+    dbg!(not_match_source_operations.clone()); 
+    dbg!(not_match_target_operations.clone());
+
+
     let current_metadata = snapshot.metadata();
 
     // TODO: Given the join predicate, remove any expression that involve the
@@ -1014,7 +1022,8 @@ async fn execute(
     // Attempt to construct an early filter that we can apply to the Add action list and the delta scan.
     // In the case where there are partition columns in the join predicate, we can scan the source table
     // to get the distinct list of partitions affected and constrain the search to those.
-    let target_subset_filter = if !not_match_source_operations.is_empty() {
+    dbg!(predicate.clone());
+    let target_subset_filter = if !not_match_source_operations.is_empty() | !match_operations.is_empty() {
         // It's only worth trying to create an early filter where there are no `when_not_matched_source` operators, since
         // that implies a full scan
         None
@@ -1029,6 +1038,7 @@ async fn execute(
         )
         .await?
     };
+    dbg!(target_subset_filter.clone());
     let target = match target_subset_filter.as_ref() {
         None => target,
         Some(subset_filter) => {
@@ -1052,13 +1062,22 @@ async fn execute(
     let target = DataFrame::new(state.clone(), target);
     let target = target.with_column(TARGET_COLUMN, lit(true))?;
 
+    let df_str = crate::arrow::util::pretty::pretty_format_batches(target.clone().collect().await?.as_ref())?;
+    println!("target {}", df_str.to_string());
+
     let join = source.join(target, JoinType::Full, &[], &[], Some(predicate.clone()))?;
     let join_schema_df = join.schema().to_owned();
+
+
+    let df_str = crate::arrow::util::pretty::pretty_format_batches(join.clone().collect().await?.as_ref())?;
+    println!("joined df{}", df_str.to_string());
 
     let match_operations: Vec<MergeOperation> = match_operations
         .into_iter()
         .map(|op| MergeOperation::try_from(op, &join_schema_df, &state, &target_alias))
         .collect::<Result<Vec<MergeOperation>, DeltaTableError>>()?;
+
+    dbg!(match_operations.clone());
 
     let not_match_target_operations: Vec<MergeOperation> = not_match_target_operations
         .into_iter()
@@ -1145,6 +1164,8 @@ async fn execute(
         &matched,
     )?;
 
+    dbg!(match_operations.clone());
+
     let not_match_target_operations = update_case(
         not_match_target_operations,
         &mut ops,
@@ -1176,6 +1197,9 @@ async fn execute(
     let case = CaseBuilder::new(None, when_expr, then_expr, None).end()?;
 
     let projection = join.with_column(OPERATION_COLUMN, case)?;
+
+    let df_str = crate::arrow::util::pretty::pretty_format_batches(projection.clone().collect().await?.as_ref())?;
+    println!("projection {}", df_str.to_string()); 
 
     let mut new_columns = vec![];
     let mut write_projection = Vec::new();
@@ -1346,9 +1370,17 @@ async fn execute(
     });
 
     let operation_count = DataFrame::new(state.clone(), operation_count);
+
+    let df_str = crate::arrow::util::pretty::pretty_format_batches(operation_count.clone().collect().await?.as_ref())?;
+    println!("projection {}", df_str.to_string()); 
+
     let filtered = operation_count.filter(col(DELETE_COLUMN).is_false())?;
 
     let project = filtered.select(write_projection)?;
+
+    let df_str = crate::arrow::util::pretty::pretty_format_batches(project.clone().collect().await?.as_ref())?;
+    println!("final_project {}", df_str.to_string()); 
+
     let merge_final = &project.into_unoptimized_plan();
 
     let write = state.create_physical_plan(merge_final).await?;
@@ -2719,7 +2751,7 @@ mod tests {
 
         assert_eq!(generalized, expected_filter);
     }
-
+    
     #[tokio::test]
     async fn test_generalize_filter_keeps_only_static_target_references() {
         let source = TableReference::parse_str("source");
@@ -2871,4 +2903,102 @@ mod tests {
 
         assert_eq!(split_pred, expected_pred_parts);
     }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_merge_pushdowns() {
+        //See #2158
+        let schema = vec![
+            StructField::new(
+                "id".to_string(),
+                DataType::Primitive(PrimitiveType::String),
+                true,
+            ),
+            StructField::new(
+                "cost".to_string(),
+                DataType::Primitive(PrimitiveType::Float),
+                true,
+            ),
+            StructField::new(
+                "month".to_string(),
+                DataType::Primitive(PrimitiveType::String),
+                true,
+            ),
+        ];
+
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", ArrowDataType::Utf8, true),
+            Field::new("cost", ArrowDataType::Float32, true),
+            Field::new("month", ArrowDataType::Utf8, true),
+        ]));
+
+        let table = DeltaOps::new_in_memory()
+            .create()
+            .with_columns(schema)
+            .await
+            .unwrap();
+
+        let ctx = SessionContext::new();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&arrow_schema.clone()),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["A", "B"])),
+                Arc::new(arrow::array::Float32Array::from(vec![Some(10.15), None])),
+                Arc::new(arrow::array::StringArray::from(vec![
+                    "2023-07-04",
+                    "2023-07-04",
+                ])),
+            ],
+        )
+        .unwrap();
+
+        let table = DeltaOps(table)
+            .write(vec![batch.clone()])
+            .with_save_mode(SaveMode::Append)
+            .await
+            .unwrap();
+        assert_eq!(table.version(), 1);
+        assert_eq!(table.get_files_count(), 1);
+
+        let batch = RecordBatch::try_new(
+            Arc::clone(&arrow_schema.clone()),
+            vec![
+                Arc::new(arrow::array::StringArray::from(vec!["A", "B"])),
+                Arc::new(arrow::array::Float32Array::from(vec![Some(12.15), Some(11.15)])),
+                Arc::new(arrow::array::StringArray::from(vec![
+                    "2023-07-04",
+                    "2023-07-04",
+                ])),
+            ],
+        ).unwrap();
+        let source = ctx.read_batch(batch).unwrap();
+
+        let (table, _metrics) = DeltaOps(table)
+            .merge(source, "target.id = source.id and target.cost is null")
+            .with_source_alias("source")
+            .with_target_alias("target")
+            .when_matched_update(|insert| {
+                insert
+                    .update("id", "target.id")
+                    .update("cost", "source.cost")
+                    .update("month", "target.month")
+            })
+            .unwrap()
+            .await
+            .unwrap();
+
+        let expected = vec![
+    "+----+-------+------------+",
+    "| id | cost  | month      |",
+    "+----+-------+------------+",
+    "| A  | 10.15 | 2023-07-04 |",
+    "| B  | 11.15 | 2023-07-04 |",
+    "+----+-------+------------+",
+        ];
+        let actual = get_data(&table).await;
+        assert_batches_sorted_eq!(&expected, &actual);
+    }
+
+
+
 }
