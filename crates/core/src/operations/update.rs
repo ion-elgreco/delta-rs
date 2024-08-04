@@ -349,7 +349,6 @@ async fn execute(
     );
 
     let tracker = CDCTracker::new(
-        input_schema.clone(),
         df,
         updated_df.drop_columns(&vec![UPDATE_PREDICATE_COLNAME])?,
     );
