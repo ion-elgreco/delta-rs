@@ -429,7 +429,6 @@ async fn execute(
                     None,
                     writer_properties,
                     safe_cast,
-                    None,
                     writer_stats_config,
                     None,
                 )
