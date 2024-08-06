@@ -715,7 +715,7 @@ async fn prepare_predicate_actions(
         find_files(snapshot, log_store.clone(), &state, Some(predicate.clone())).await?;
 
     let mut actions = execute_non_empty_expr(
-        &snapshot,
+        snapshot,
         log_store,
         state,
         partition_columns,
@@ -773,7 +773,7 @@ async fn execute_non_empty_expr_cdc_all_actions(
     let input_schema = snapshot.input_schema()?;
     let input_dfschema: DFSchema = input_schema.clone().as_ref().clone().try_into()?;
 
-    Ok(execute_non_empty_expr_cdc(
+    execute_non_empty_expr_cdc(
         snapshot,
         log_store,
         state,
@@ -784,7 +784,7 @@ async fn execute_non_empty_expr_cdc_all_actions(
         writer_properties,
         writer_stats_config,
     )
-    .await?)
+    .await
 }
 
 impl std::future::IntoFuture for WriteBuilder {
