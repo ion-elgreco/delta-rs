@@ -1667,10 +1667,10 @@ pub async fn find_files<'a>(
         None => {
             println!("im here 3.");
             Ok(FindFiles {
-            
-            candidates: snapshot.file_actions()?,
-            partition_scan: true,
-        })},
+                candidates: snapshot.file_actions()?,
+                partition_scan: true,
+            })
+        }
     }
 }
 

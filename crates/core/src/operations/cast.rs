@@ -1,8 +1,6 @@
 //! Provide common cast functionality for callers
 //!
-use crate::kernel::{
-    ArrayType, DataType as DeltaDataType, MapType, StructField, StructType,
-};
+use crate::kernel::{ArrayType, DataType as DeltaDataType, MapType, StructField, StructType};
 use arrow::datatypes::DataType::Dictionary;
 use arrow_array::cast::AsArray;
 use arrow_array::{
@@ -142,7 +140,6 @@ pub(crate) fn merge_struct(
         }
     }
 }
-
 
 pub(crate) fn merge_field(left: &ArrowField, right: &ArrowField) -> Result<ArrowField, ArrowError> {
     if left == right {
