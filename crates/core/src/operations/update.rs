@@ -292,9 +292,6 @@ async fn execute(
             .with_files(candidates.candidates.clone()),
     );
 
-    // Create a projection for a new column with the predicate evaluated
-    let input_schema = snapshot.input_schema()?;
-
     let target_provider = provider_as_source(target_provider);
     let plan = LogicalPlanBuilder::scan("target", target_provider.clone(), None)?.build()?;
 
