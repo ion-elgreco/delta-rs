@@ -1510,6 +1510,8 @@ pub(crate) async fn find_files_scan<'a>(
 
     let logical_schema = df_logical_schema(snapshot, &scan_config)?;
 
+    dbg!(&logical_schema);
+
     // Identify which columns we need to project
     let mut used_columns = expression
         .column_refs()
@@ -1527,6 +1529,8 @@ pub(crate) async fn find_files_scan<'a>(
         .await?;
     let scan = Arc::new(scan);
 
+    dbg!(&scan.schema());
+
     let config = &scan.config;
     let input_schema = scan.logical_schema.as_ref().to_owned();
     let input_dfschema = input_schema.clone().try_into()?;
@@ -1539,8 +1543,10 @@ pub(crate) async fn find_files_scan<'a>(
     let limit: Arc<dyn ExecutionPlan> = Arc::new(LocalLimitExec::new(filter, 1));
 
     let task_ctx = Arc::new(TaskContext::from(state));
+    println!("Start collecting");
     let path_batches = datafusion::physical_plan::collect(limit, task_ctx).await?;
 
+    println!("I almost finished it");
     join_batches_with_add_actions(
         path_batches,
         candidate_map,
@@ -1625,12 +1631,14 @@ pub async fn find_files<'a>(
             expr_properties.result?;
 
             if expr_properties.partition_only {
+                println!("im here 1.");
                 let candidates = scan_memory_table(snapshot, predicate).await?;
                 Ok(FindFiles {
                     candidates,
                     partition_scan: true,
                 })
             } else {
+                println!("im here 2.");
                 let candidates =
                     find_files_scan(snapshot, log_store, state, predicate.to_owned()).await?;
 
@@ -1640,10 +1648,13 @@ pub async fn find_files<'a>(
                 })
             }
         }
-        None => Ok(FindFiles {
+        None => {
+            println!("im here 3.");
+            Ok(FindFiles {
+            
             candidates: snapshot.file_actions()?,
             partition_scan: true,
-        }),
+        })},
     }
 }
 

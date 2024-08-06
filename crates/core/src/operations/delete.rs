@@ -174,6 +174,8 @@ async fn excute_non_empty_expr(
         let filter: Arc<dyn ExecutionPlan> =
             Arc::new(FilterExec::try_new(predicate_expr, scan.clone())?);
 
+        dbg!(&filter.schema());
+
         let add_actions: Vec<Action> = write_execution_plan(
             Some(snapshot),
             state.clone(),
@@ -263,8 +265,11 @@ async fn execute(
     let mut metrics = DeleteMetrics::default();
 
     let scan_start = Instant::now();
+    println!("Looking for files");
     let candidates = find_files(&snapshot, log_store.clone(), &state, predicate.clone()).await?;
     metrics.scan_time_ms = Instant::now().duration_since(scan_start).as_millis() as u64;
+
+    println!("I found files");
 
     let predicate = predicate.unwrap_or(Expr::Literal(ScalarValue::Boolean(Some(true))));
 

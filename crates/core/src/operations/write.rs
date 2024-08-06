@@ -377,13 +377,8 @@ async fn write_execution_plan_with_predicate(
     writer_stats_config: WriterStatsConfig,
     sender: Option<Sender<RecordBatch>>,
 ) -> DeltaResult<Vec<Action>> {
-    let schema: ArrowSchemaRef = if schema_mode.is_some() {
-        plan.schema()
-    } else {
-        snapshot
-            .and_then(|s| s.input_schema().ok())
-            .unwrap_or(plan.schema())
-    };
+    // At this point we can safely take the plan schema
+    let schema = plan.schema();
     let checker = if let Some(snapshot) = snapshot {
         DeltaDataChecker::new(snapshot)
     } else {
@@ -712,11 +707,7 @@ impl std::future::IntoFuture for WriteBuilder {
 
                     let mut new_schema = None;
                     if let Some(snapshot) = &this.snapshot {
-                        let table_schema = snapshot
-                            .physical_arrow_schema(this.log_store.object_store().clone())
-                            .await
-                            .or_else(|_| snapshot.arrow_schema())
-                            .unwrap_or(schema.clone());
+                        let table_schema = snapshot.input_schema()?;
 
                         if let Err(schema_err) =
                             try_cast_batch(schema.fields(), table_schema.fields())

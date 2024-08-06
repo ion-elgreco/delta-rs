@@ -1,23 +1,28 @@
 //! Provide common cast functionality for callers
 //!
 use crate::kernel::{
-    ArrayType, DataType as DeltaDataType, MapType, MetadataValue, StructField, StructType,
+    ArrayType, DataType as DeltaDataType, MapType, StructField, StructType,
 };
+use arrow::datatypes::DataType::Dictionary;
 use arrow_array::cast::AsArray;
 use arrow_array::{
     new_null_array, Array, ArrayRef, GenericListArray, MapArray, OffsetSizeTrait, RecordBatch,
     RecordBatchOptions, StructArray,
 };
 use arrow_cast::{cast_with_options, CastOptions};
-use arrow_schema::{ArrowError, DataType, FieldRef, Fields, SchemaRef as ArrowSchemaRef};
+use arrow_schema::{
+    ArrowError, DataType, Field as ArrowField, FieldRef, Fields, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef,
+};
+use delta_kernel::schema::MetadataValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::DeltaResult;
 
 fn try_merge_metadata(
-    left: &mut HashMap<String, MetadataValue>,
-    right: &HashMap<String, MetadataValue>,
+    left: &mut HashMap<String, String>,
+    right: &HashMap<String, String>,
 ) -> Result<(), ArrowError> {
     for (k, v) in right {
         if let Some(vl) = left.get(k) {
@@ -34,54 +39,23 @@ fn try_merge_metadata(
     Ok(())
 }
 
-pub(crate) fn merge_struct(
-    left: &StructType,
-    right: &StructType,
-) -> Result<StructType, ArrowError> {
-    let mut errors = Vec::new();
-    let merged_fields: Result<Vec<StructField>, ArrowError> = left
-        .fields()
-        .map(|field| {
-            let right_field = right.field(field.name());
-            if let Some(right_field) = right_field {
-                let type_or_not = merge_type(field.data_type(), right_field.data_type());
-                match type_or_not {
-                    Err(e) => {
-                        errors.push(e.to_string());
-                        Err(e)
-                    }
-                    Ok(f) => {
-                        let mut new_field = StructField::new(
-                            field.name(),
-                            f,
-                            field.is_nullable() || right_field.is_nullable(),
-                        );
-
-                        new_field.metadata.clone_from(&field.metadata);
-                        try_merge_metadata(&mut new_field.metadata, &right_field.metadata)?;
-                        Ok(new_field)
-                    }
-                }
-            } else {
-                Ok(field.clone())
+fn try_merge_delta_metadata(
+    left: &mut HashMap<String, MetadataValue>,
+    right: &HashMap<String, MetadataValue>,
+) -> Result<(), ArrowError> {
+    for (k, v) in right {
+        if let Some(vl) = left.get(k) {
+            if vl != v {
+                return Err(ArrowError::SchemaError(format!(
+                    "Cannot merge metadata with different values for key {}",
+                    k
+                )));
             }
-        })
-        .collect();
-    match merged_fields {
-        Ok(mut fields) => {
-            for field in right.fields() {
-                if !left.field(field.name()).is_some() {
-                    fields.push(field.clone());
-                }
-            }
-
-            Ok(StructType::new(fields))
-        }
-        Err(e) => {
-            errors.push(e.to_string());
-            Err(ArrowError::SchemaError(errors.join("\n")))
+        } else {
+            left.insert(k.clone(), v.clone());
         }
     }
+    Ok(())
 }
 
 pub(crate) fn merge_type(
@@ -119,14 +93,190 @@ pub(crate) fn merge_type(
     }
 }
 
+pub(crate) fn merge_struct(
+    left: &StructType,
+    right: &StructType,
+) -> Result<StructType, ArrowError> {
+    let mut errors = Vec::new();
+    let merged_fields: Result<Vec<StructField>, ArrowError> = left
+        .fields()
+        .map(|field| {
+            let right_field = right.field(field.name());
+            if let Some(right_field) = right_field {
+                let type_or_not = merge_type(field.data_type(), right_field.data_type());
+                match type_or_not {
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        Err(e)
+                    }
+                    Ok(f) => {
+                        let mut new_field = StructField::new(
+                            field.name(),
+                            f,
+                            field.is_nullable() || right_field.is_nullable(),
+                        );
+
+                        new_field.metadata.clone_from(&field.metadata);
+                        try_merge_delta_metadata(&mut new_field.metadata, &right_field.metadata)?;
+                        Ok(new_field)
+                    }
+                }
+            } else {
+                Ok(field.clone())
+            }
+        })
+        .collect();
+    match merged_fields {
+        Ok(mut fields) => {
+            for field in right.fields() {
+                if !left.field(field.name()).is_some() {
+                    fields.push(field.clone());
+                }
+            }
+
+            Ok(StructType::new(fields))
+        }
+        Err(e) => {
+            errors.push(e.to_string());
+            Err(ArrowError::SchemaError(errors.join("\n")))
+        }
+    }
+}
+
+
+pub(crate) fn merge_field(left: &ArrowField, right: &ArrowField) -> Result<ArrowField, ArrowError> {
+    if left == right {
+        return Ok(left.clone());
+    }
+
+    let table_type = left.data_type();
+    let batch_type = right.data_type();
+
+    if let Dictionary(_, value_type) = table_type {
+        if value_type.equals_datatype(batch_type) {
+            return Ok(left.clone());
+        }
+    }
+    if let Dictionary(_, value_type) = table_type {
+        if value_type.equals_datatype(batch_type) {
+            return Ok(right.clone());
+        }
+    }
+
+    // With Utf8 we always take  the right type since that is coming from the incoming data
+    // by doing that we allow passthrough of any string flavor
+    if let (
+        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
+    ) = (table_type, batch_type)
+    {
+        if left.is_nullable() == right.is_nullable() {
+            return Ok(ArrowField::new(
+                right.name(),
+                batch_type.clone(),
+                right.is_nullable(),
+            ));
+        }
+    }
+
+    // With binary we always take  the right type since that is coming from the incoming data
+    // by doing that we allow passthrough of any binary flavor
+    if let (
+        DataType::Binary | DataType::BinaryView | DataType::LargeBinary,
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView,
+    ) = (table_type, batch_type)
+    {
+        if left.is_nullable() == right.is_nullable() {
+            return Ok(ArrowField::new(
+                right.name(),
+                batch_type.clone(),
+                right.is_nullable(),
+            ));
+        }
+    }
+
+    if let (
+        DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
+        DataType::LargeList(right_child_fields),
+    ) = (table_type, batch_type)
+    {
+        if left.is_nullable() == right.is_nullable() {
+            let merged = merge_field(&left_child_fields, &right_child_fields)?;
+            let list_field = DataType::LargeList(merged.into());
+            return Ok(ArrowField::new(
+                right.name(),
+                list_field,
+                right.is_nullable(),
+            ));
+        }
+    }
+
+    if let (
+        DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
+        DataType::List(right_child_fields),
+    ) = (table_type, batch_type)
+    {
+        if left.is_nullable() == right.is_nullable() {
+            let merged = merge_field(&left_child_fields, &right_child_fields)?;
+            let list_field = DataType::List(merged.into());
+            return Ok(ArrowField::new(
+                right.name(),
+                list_field,
+                right.is_nullable(),
+            ));
+        }
+    }
+
+    let mut new_field = left.clone();
+    new_field.try_merge(right)?;
+    Ok(new_field)
+}
+
 pub(crate) fn merge_schema(
-    left: ArrowSchemaRef,
-    right: ArrowSchemaRef,
+    table_schema: ArrowSchemaRef,
+    batch_schema: ArrowSchemaRef,
 ) -> Result<ArrowSchemaRef, ArrowError> {
-    let left_delta: StructType = left.try_into()?;
-    let right_delta: StructType = right.try_into()?;
-    let merged: StructType = merge_struct(&left_delta, &right_delta)?;
-    Ok(Arc::new((&merged).try_into()?))
+    let mut errors = Vec::with_capacity(table_schema.fields().len());
+    let merged_fields: Result<Vec<ArrowField>, ArrowError> = table_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let right_field = batch_schema.field_with_name(field.name());
+            if let Ok(right_field) = right_field {
+                let field_or_not = merge_field(field.as_ref(), right_field);
+                match field_or_not {
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        Err(e)
+                    }
+                    Ok(mut f) => {
+                        let mut field_matadata = f.metadata().clone();
+                        try_merge_metadata(&mut field_matadata, right_field.metadata())?;
+                        f.set_metadata(field_matadata);
+                        Ok(f)
+                    }
+                }
+            } else {
+                Ok(field.as_ref().clone())
+            }
+        })
+        .collect();
+    match merged_fields {
+        Ok(mut fields) => {
+            for field in batch_schema.fields() {
+                if !table_schema.field_with_name(field.name()).is_ok() {
+                    fields.push(field.as_ref().clone());
+                }
+            }
+            let merged_schema = ArrowSchema::new(fields).into();
+            dbg!(&merged_schema);
+            Ok(merged_schema)
+        }
+        Err(e) => {
+            errors.push(e.to_string());
+            Err(ArrowError::SchemaError(errors.join("\n")))
+        }
+    }
 }
 
 fn cast_struct(
@@ -204,9 +354,8 @@ fn cast_field(
     cast_options: &CastOptions,
     add_missing: bool,
 ) -> Result<ArrayRef, ArrowError> {
-    if let (DataType::Struct(_), DataType::Struct(child_fields)) =
-        (col.data_type(), field.data_type())
-    {
+    let (col_type, field_type) = (col.data_type(), field.data_type());
+    if let (DataType::Struct(_), DataType::Struct(child_fields)) = (col_type, field_type) {
         let child_struct = StructArray::from(col.into_data());
         Ok(Arc::new(cast_struct(
             &child_struct,
@@ -214,8 +363,10 @@ fn cast_field(
             cast_options,
             add_missing,
         )?) as ArrayRef)
-    } else if let (DataType::List(_), DataType::List(child_fields)) =
-        (col.data_type(), field.data_type())
+    } else if let (
+        DataType::List(_),
+        DataType::List(child_fields) | DataType::LargeList(child_fields),
+    ) = (col_type, field_type)
     {
         Ok(Arc::new(cast_list(
             col.as_any()
@@ -229,8 +380,10 @@ fn cast_field(
             cast_options,
             add_missing,
         )?) as ArrayRef)
-    } else if let (DataType::LargeList(_), DataType::LargeList(child_fields)) =
-        (col.data_type(), field.data_type())
+    } else if let (
+        DataType::LargeList(_),
+        DataType::List(child_fields) | DataType::LargeList(child_fields),
+    ) = (col_type, field_type)
     {
         Ok(Arc::new(cast_list(
             col.as_any()
@@ -245,7 +398,7 @@ fn cast_field(
             add_missing,
         )?) as ArrayRef)
     } else if let (DataType::Map(_, _), DataType::Map(child_fields, sorted)) =
-        (col.data_type(), field.data_type())
+        (col_type, field_type)
     {
         Ok(Arc::new(cast_map(
             col.as_map_opt().ok_or(ArrowError::CastError(format!(
@@ -258,8 +411,20 @@ fn cast_field(
             cast_options,
             add_missing,
         )?) as ArrayRef)
-    } else if is_cast_required(col.data_type(), field.data_type()) {
-        cast_with_options(col, field.data_type(), cast_options)
+    } else if let (
+        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8,
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
+    ) = (col_type, field_type)
+    {
+        Ok(col.clone())
+    } else if let (
+        DataType::Binary | DataType::BinaryView | DataType::LargeBinary,
+        DataType::Binary | DataType::LargeBinary | DataType::BinaryView,
+    ) = (col_type, field_type)
+    {
+        Ok(col.clone())
+    } else if is_cast_required(col_type, field_type) {
+        cast_with_options(col, field_type, cast_options)
     } else {
         Ok(col.clone())
     }
