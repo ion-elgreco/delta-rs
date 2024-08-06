@@ -2291,7 +2291,10 @@ mod tests {
         let ctx = SessionContext::new_with_config(cfg);
         ctx.register_table("test", Arc::new(provider)).unwrap();
 
-        let df = ctx.sql("select col_1, col_2 from test WHERE col_1 = 'A'").await.unwrap();
+        let df = ctx
+            .sql("select col_1, col_2 from test WHERE col_1 = 'A'")
+            .await
+            .unwrap();
         let actual = df.collect().await.unwrap();
         let expected = vec![
             "+-------+-------+",
