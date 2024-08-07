@@ -378,18 +378,12 @@ async fn write_execution_plan_with_predicate(
     target_file_size: Option<usize>,
     write_batch_size: Option<usize>,
     writer_properties: Option<WriterProperties>,
-    safe_cast: bool,
-    schema_mode: Option<SchemaMode>,
     writer_stats_config: WriterStatsConfig,
     sender: Option<Sender<RecordBatch>>,
 ) -> DeltaResult<Vec<Action>> {
-    let schema: ArrowSchemaRef = if schema_mode.is_some() {
-        plan.schema()
-    } else {
-        snapshot
-            .and_then(|s| s.input_schema().ok())
-            .unwrap_or(plan.schema())
-    };
+    // We always take the plan Schema since the data may contain Large/View arrow types, the schema
+    // was prior constructed with this in mind. Also cast_record_batch allows this passthrough
+    let schema: ArrowSchemaRef = plan.schema();
     let checker = if let Some(snapshot) = snapshot {
         DeltaDataChecker::new(snapshot)
     } else {
@@ -431,21 +425,15 @@ async fn write_execution_plan_with_predicate(
                     let batch = maybe_batch?;
 
                     checker_stream.check_batch(&batch).await?;
-                    let arr = super::cast::cast_record_batch(
-                        &batch,
-                        inner_schema.clone(),
-                        safe_cast,
-                        schema_mode == Some(SchemaMode::Merge),
-                    )?;
 
                     if let Some(s) = sendable.as_ref() {
-                        if let Err(e) = s.send(arr.clone()).await {
+                        if let Err(e) = s.send(batch.clone()).await {
                             error!("Failed to send data to observer: {e:#?}");
                         }
                     } else {
                         debug!("write_execution_plan_with_predicate did not send any batches, no sender.");
                     }
-                    writer.write(&arr).await?;
+                    writer.write(&batch).await?;
                 }
                 let add_actions = writer.close().await;
                 match add_actions {
@@ -481,15 +469,11 @@ pub(crate) async fn write_execution_plan_cdc(
     target_file_size: Option<usize>,
     write_batch_size: Option<usize>,
     writer_properties: Option<WriterProperties>,
-    safe_cast: bool,
     writer_stats_config: WriterStatsConfig,
     sender: Option<Sender<RecordBatch>>,
 ) -> DeltaResult<Vec<Action>> {
     let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
 
-    // If not overwrite, the plan schema is not taken but table schema,
-    // however we need the plan schema since it has the _change_type_col
-    let schema_mode = Some(SchemaMode::Overwrite);
     Ok(write_execution_plan(
         snapshot,
         state,
@@ -499,8 +483,6 @@ pub(crate) async fn write_execution_plan_cdc(
         target_file_size,
         write_batch_size,
         writer_properties,
-        safe_cast,
-        schema_mode,
         writer_stats_config,
         sender,
     )
@@ -536,8 +518,6 @@ pub(crate) async fn write_execution_plan(
     target_file_size: Option<usize>,
     write_batch_size: Option<usize>,
     writer_properties: Option<WriterProperties>,
-    safe_cast: bool,
-    schema_mode: Option<SchemaMode>,
     writer_stats_config: WriterStatsConfig,
     sender: Option<Sender<RecordBatch>>,
 ) -> DeltaResult<Vec<Action>> {
@@ -551,8 +531,6 @@ pub(crate) async fn write_execution_plan(
         target_file_size,
         write_batch_size,
         writer_properties,
-        safe_cast,
-        schema_mode,
         writer_stats_config,
         sender,
     )
@@ -609,8 +587,6 @@ async fn execute_non_empty_expr(
             Some(snapshot.table_config().target_file_size() as usize),
             None,
             writer_properties.clone(),
-            false,
-            None,
             writer_stats_config.clone(),
             None,
         )
@@ -692,7 +668,6 @@ pub(crate) async fn execute_non_empty_expr_cdc(
                 Some(snapshot.table_config().target_file_size() as usize),
                 None,
                 writer_properties,
-                false,
                 writer_stats_config,
                 None,
             )
@@ -851,12 +826,7 @@ impl std::future::IntoFuture for WriteBuilder {
 
                     let mut new_schema = None;
                     if let Some(snapshot) = &this.snapshot {
-                        let table_schema = snapshot
-                            .physical_arrow_schema(this.log_store.object_store().clone())
-                            .await
-                            .or_else(|_| snapshot.arrow_schema())
-                            .unwrap_or(schema.clone());
-
+                        let table_schema = snapshot.input_schema()?;
                         if let Err(schema_err) =
                             try_cast_batch(schema.fields(), table_schema.fields())
                         {
@@ -875,17 +845,28 @@ impl std::future::IntoFuture for WriteBuilder {
                             } else {
                                 return Err(schema_err.into());
                             }
+                        } else if this.mode == SaveMode::Overwrite
+                            && this.schema_mode == Some(SchemaMode::Overwrite)
+                        {
+                            new_schema = None // we overwrite anyway, so no need to cast
+                        } else {
+                            // We take the table schema to explicility cast batches, required
+                            // when we first write int and then write utf8, see test_write_different_types
+                            new_schema = Some(table_schema);
                         }
                     }
-
                     let data = if !partition_columns.is_empty() {
                         // TODO partitioning should probably happen in its own plan ...
                         let mut partitions: HashMap<String, Vec<RecordBatch>> = HashMap::new();
                         for batch in batches {
                             let real_batch = match new_schema.clone() {
-                                Some(new_schema) => {
-                                    cast_record_batch(&batch, new_schema, false, true)?
-                                }
+                                Some(new_schema) => cast_record_batch(
+                                    &batch,
+                                    new_schema,
+                                    this.safe_cast,
+                                    true,
+                                    true,
+                                )?,
                                 None => batch,
                             };
 
@@ -915,7 +896,8 @@ impl std::future::IntoFuture for WriteBuilder {
                                     new_batches.push(cast_record_batch(
                                         &batch,
                                         new_schema.clone(),
-                                        false,
+                                        this.safe_cast,
+                                        true,
                                         true,
                                     )?);
                                 }
@@ -1019,8 +1001,6 @@ impl std::future::IntoFuture for WriteBuilder {
                 this.target_file_size,
                 this.write_batch_size,
                 this.writer_properties.clone(),
-                this.safe_cast,
-                this.schema_mode,
                 writer_stats_config.clone(),
                 None,
             )
@@ -1031,11 +1011,7 @@ impl std::future::IntoFuture for WriteBuilder {
             if let Some(snapshot) = &this.snapshot {
                 if matches!(this.mode, SaveMode::Overwrite) {
                     // Update metadata with new schema
-                    let table_schema = snapshot
-                        .physical_arrow_schema(this.log_store.object_store().clone())
-                        .await
-                        .or_else(|_| snapshot.arrow_schema())
-                        .unwrap_or(schema.clone());
+                    let table_schema = snapshot.input_schema()?;
 
                     let configuration = snapshot.metadata().configuration.clone();
                     let current_protocol = snapshot.protocol();

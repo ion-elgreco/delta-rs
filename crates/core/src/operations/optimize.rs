@@ -505,6 +505,7 @@ impl MergePlan {
                 task_parameters.file_schema.clone(),
                 false,
                 true,
+                false,
             )?;
             partial_metrics.num_batches += 1;
             writer.write(&batch).await.map_err(DeltaTableError::from)?;

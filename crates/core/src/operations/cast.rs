@@ -1,23 +1,25 @@
 //! Provide common cast functionality for callers
 //!
-use crate::kernel::{
-    ArrayType, DataType as DeltaDataType, MapType, MetadataValue, StructField, StructType,
-};
+use crate::kernel::{ArrayType, DataType as DeltaDataType, MapType, StructField, StructType};
+use arrow::datatypes::DataType::Dictionary;
 use arrow_array::cast::AsArray;
 use arrow_array::{
     new_null_array, Array, ArrayRef, GenericListArray, MapArray, OffsetSizeTrait, RecordBatch,
     RecordBatchOptions, StructArray,
 };
 use arrow_cast::{cast_with_options, CastOptions};
-use arrow_schema::{ArrowError, DataType, FieldRef, Fields, SchemaRef as ArrowSchemaRef};
+use arrow_schema::{
+    ArrowError, DataType, Field as ArrowField, FieldRef, Fields, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::DeltaResult;
 
-fn try_merge_metadata(
-    left: &mut HashMap<String, MetadataValue>,
-    right: &HashMap<String, MetadataValue>,
+fn try_merge_metadata<T: std::cmp::PartialEq + Clone>(
+    left: &mut HashMap<String, T>,
+    right: &HashMap<String, T>,
 ) -> Result<(), ArrowError> {
     for (k, v) in right {
         if let Some(vl) = left.get(k) {
@@ -32,6 +34,41 @@ fn try_merge_metadata(
         }
     }
     Ok(())
+}
+
+pub(crate) fn merge_type(
+    left: &DeltaDataType,
+    right: &DeltaDataType,
+) -> Result<DeltaDataType, ArrowError> {
+    if left == right {
+        return Ok(left.clone());
+    }
+    match (left, right) {
+        (DeltaDataType::Array(a), DeltaDataType::Array(b)) => {
+            let merged = merge_type(&a.element_type, &b.element_type)?;
+            Ok(DeltaDataType::Array(Box::new(ArrayType::new(
+                merged,
+                a.contains_null() || b.contains_null(),
+            ))))
+        }
+        (DeltaDataType::Map(a), DeltaDataType::Map(b)) => {
+            let merged_key = merge_type(&a.key_type, &b.key_type)?;
+            let merged_value = merge_type(&a.value_type, &b.value_type)?;
+            Ok(DeltaDataType::Map(Box::new(MapType::new(
+                merged_key,
+                merged_value,
+                a.value_contains_null() || b.value_contains_null(),
+            ))))
+        }
+        (DeltaDataType::Struct(a), DeltaDataType::Struct(b)) => {
+            let merged = merge_struct(a, b)?;
+            Ok(DeltaDataType::Struct(Box::new(merged)))
+        }
+        (a, b) => Err(ArrowError::SchemaError(format!(
+            "Cannot merge types {} and {}",
+            a, b
+        ))),
+    }
 }
 
 pub(crate) fn merge_struct(
@@ -84,49 +121,165 @@ pub(crate) fn merge_struct(
     }
 }
 
-pub(crate) fn merge_type(
-    left: &DeltaDataType,
-    right: &DeltaDataType,
-) -> Result<DeltaDataType, ArrowError> {
+pub(crate) fn merge_field(left: &ArrowField, right: &ArrowField) -> Result<ArrowField, ArrowError> {
     if left == right {
         return Ok(left.clone());
     }
-    match (left, right) {
-        (DeltaDataType::Array(a), DeltaDataType::Array(b)) => {
-            let merged = merge_type(&a.element_type, &b.element_type)?;
-            Ok(DeltaDataType::Array(Box::new(ArrayType::new(
-                merged,
-                a.contains_null() || b.contains_null(),
-            ))))
+
+    let (table_type, batch_type) = (left.data_type(), right.data_type());
+
+    match (table_type, batch_type) {
+        (Dictionary(key_type, value_type), _)
+            if matches!(
+                value_type.as_ref(),
+                DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+            ) && matches!(
+                batch_type,
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) =>
+        {
+            Ok(ArrowField::new(
+                right.name(),
+                Dictionary(key_type.clone(), Box::new(batch_type.clone())),
+                left.is_nullable() || right.is_nullable(),
+            ))
         }
-        (DeltaDataType::Map(a), DeltaDataType::Map(b)) => {
-            let merged_key = merge_type(&a.key_type, &b.key_type)?;
-            let merged_value = merge_type(&a.value_type, &b.value_type)?;
-            Ok(DeltaDataType::Map(Box::new(MapType::new(
-                merged_key,
-                merged_value,
-                a.value_contains_null() || b.value_contains_null(),
-            ))))
+        (Dictionary(key_type, value_type), _)
+            if matches!(
+                value_type.as_ref(),
+                DataType::Binary | DataType::BinaryView | DataType::LargeBinary
+            ) && matches!(
+                batch_type,
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            ) =>
+        {
+            Ok(ArrowField::new(
+                right.name(),
+                Dictionary(key_type.clone(), Box::new(batch_type.clone())),
+                left.is_nullable() || right.is_nullable(),
+            ))
         }
-        (DeltaDataType::Struct(a), DeltaDataType::Struct(b)) => {
-            let merged = merge_struct(a, b)?;
-            Ok(DeltaDataType::Struct(Box::new(merged)))
+        (Dictionary(_, value_type), _) if value_type.equals_datatype(batch_type) => Ok(left
+            .clone()
+            .with_nullable(left.is_nullable() || right.is_nullable())),
+        (_, Dictionary(_, value_type))
+            if matches!(
+                table_type,
+                DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8
+            ) && matches!(
+                value_type.as_ref(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ) =>
+        {
+            Ok(right
+                .clone()
+                .with_nullable(left.is_nullable() || right.is_nullable()))
         }
-        (a, b) => Err(ArrowError::SchemaError(format!(
-            "Cannot merge types {} and {}",
-            a, b
-        ))),
+        (_, Dictionary(_, value_type))
+            if matches!(
+                table_type,
+                DataType::Binary | DataType::BinaryView | DataType::LargeBinary
+            ) && matches!(
+                value_type.as_ref(),
+                DataType::Binary | DataType::LargeBinary | DataType::BinaryView
+            ) =>
+        {
+            Ok(right
+                .clone()
+                .with_nullable(left.is_nullable() || right.is_nullable()))
+        }
+        (_, Dictionary(_, value_type)) if value_type.equals_datatype(batch_type) => Ok(right
+            .clone()
+            .with_nullable(left.is_nullable() || right.is_nullable())),
+        // With Utf8/binary we always take  the right type since that is coming from the incoming data
+        // by doing that we allow passthrough of any string flavor
+        (
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
+        )
+        | (
+            DataType::Binary | DataType::BinaryView | DataType::LargeBinary,
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView,
+        ) => Ok(ArrowField::new(
+            right.name(),
+            batch_type.clone(),
+            right.is_nullable() || left.is_nullable(),
+        )),
+        (
+            DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
+            DataType::LargeList(right_child_fields),
+        ) => {
+            let merged = merge_field(left_child_fields, right_child_fields)?;
+            Ok(ArrowField::new(
+                right.name(),
+                DataType::LargeList(merged.into()),
+                right.is_nullable() || left.is_nullable(),
+            ))
+        }
+        (
+            DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
+            DataType::List(right_child_fields),
+        ) => {
+            let merged = merge_field(left_child_fields, right_child_fields)?;
+            Ok(ArrowField::new(
+                right.name(),
+                DataType::List(merged.into()),
+                right.is_nullable() || left.is_nullable(),
+            ))
+        }
+        _ => {
+            let mut new_field = left.clone();
+            new_field.try_merge(right)?;
+            Ok(new_field)
+        }
     }
 }
 
+/// Merges Arrow Table schema and Arrow Batch Schema, by allowing Large/View Types to passthrough
 pub(crate) fn merge_schema(
-    left: ArrowSchemaRef,
-    right: ArrowSchemaRef,
+    table_schema: ArrowSchemaRef,
+    batch_schema: ArrowSchemaRef,
 ) -> Result<ArrowSchemaRef, ArrowError> {
-    let left_delta: StructType = left.try_into()?;
-    let right_delta: StructType = right.try_into()?;
-    let merged: StructType = merge_struct(&left_delta, &right_delta)?;
-    Ok(Arc::new((&merged).try_into()?))
+    let mut errors = Vec::with_capacity(table_schema.fields().len());
+    let merged_fields: Result<Vec<ArrowField>, ArrowError> = table_schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let right_field = batch_schema.field_with_name(field.name());
+            if let Ok(right_field) = right_field {
+                let field_or_not = merge_field(field.as_ref(), right_field);
+                match field_or_not {
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        Err(e)
+                    }
+                    Ok(mut f) => {
+                        let mut field_matadata = f.metadata().clone();
+                        try_merge_metadata(&mut field_matadata, right_field.metadata())?;
+                        f.set_metadata(field_matadata);
+                        Ok(f)
+                    }
+                }
+            } else {
+                Ok(field.as_ref().clone())
+            }
+        })
+        .collect();
+    match merged_fields {
+        Ok(mut fields) => {
+            for field in batch_schema.fields() {
+                if !table_schema.field_with_name(field.name()).is_ok() {
+                    fields.push(field.as_ref().clone());
+                }
+            }
+            let merged_schema = ArrowSchema::new(fields).into();
+            Ok(merged_schema)
+        }
+        Err(e) => {
+            errors.push(e.to_string());
+            Err(ArrowError::SchemaError(errors.join("\n")))
+        }
+    }
 }
 
 fn cast_struct(
@@ -134,6 +287,7 @@ fn cast_struct(
     fields: &Fields,
     cast_options: &CastOptions,
     add_missing: bool,
+    string_view_compat: bool,
 ) -> Result<StructArray, ArrowError> {
     StructArray::try_new(
         fields.to_owned(),
@@ -142,16 +296,19 @@ fn cast_struct(
             .map(|field| {
                 let col_or_not = struct_array.column_by_name(field.name());
                 match col_or_not {
-                    None => match add_missing {
-                        true if field.is_nullable() => {
+                    None => {
+                        if add_missing && field.is_nullable() {
                             Ok(new_null_array(field.data_type(), struct_array.len()))
+                        } else {
+                            Err(ArrowError::SchemaError(format!(
+                                "Could not find column {}",
+                                field.name()
+                            )))
                         }
-                        _ => Err(ArrowError::SchemaError(format!(
-                            "Could not find column {0}",
-                            field.name()
-                        ))),
-                    },
-                    Some(col) => cast_field(col, field, cast_options, add_missing),
+                    }
+                    Some(col) => {
+                        cast_field(col, field, cast_options, add_missing, string_view_compat)
+                    }
                 }
             })
             .collect::<Result<Vec<_>, _>>()?,
@@ -164,8 +321,15 @@ fn cast_list<T: OffsetSizeTrait>(
     field: &FieldRef,
     cast_options: &CastOptions,
     add_missing: bool,
+    string_view_compat: bool,
 ) -> Result<GenericListArray<T>, ArrowError> {
-    let values = cast_field(array.values(), field, cast_options, add_missing)?;
+    let values = cast_field(
+        array.values(),
+        field,
+        cast_options,
+        add_missing,
+        string_view_compat,
+    )?;
     GenericListArray::<T>::try_new(
         field.clone(),
         array.offsets().clone(),
@@ -180,10 +344,17 @@ fn cast_map(
     sorted: bool,
     cast_options: &CastOptions,
     add_missing: bool,
+    string_view_compat: bool,
 ) -> Result<MapArray, ArrowError> {
     match entries_field.data_type() {
         DataType::Struct(entry_fields) => {
-            let entries = cast_struct(array.entries(), entry_fields, cast_options, add_missing)?;
+            let entries = cast_struct(
+                array.entries(),
+                entry_fields,
+                cast_options,
+                add_missing,
+                string_view_compat,
+            )?;
             MapArray::try_new(
                 entries_field.clone(),
                 array.offsets().to_owned(),
@@ -203,65 +374,167 @@ fn cast_field(
     field: &FieldRef,
     cast_options: &CastOptions,
     add_missing: bool,
+    string_view_compat: bool,
 ) -> Result<ArrayRef, ArrowError> {
-    if let (DataType::Struct(_), DataType::Struct(child_fields)) =
-        (col.data_type(), field.data_type())
-    {
-        let child_struct = StructArray::from(col.into_data());
-        Ok(Arc::new(cast_struct(
-            &child_struct,
-            child_fields,
-            cast_options,
-            add_missing,
-        )?) as ArrayRef)
-    } else if let (DataType::List(_), DataType::List(child_fields)) =
-        (col.data_type(), field.data_type())
-    {
-        Ok(Arc::new(cast_list(
+    if string_view_compat {
+        _cast_field_passthrough(col, field, cast_options, add_missing, string_view_compat)
+    } else {
+        _cast_field_restricted(col, field, cast_options, add_missing, string_view_compat)
+    }
+}
+
+fn _cast_field_restricted(
+    col: &ArrayRef,
+    field: &FieldRef,
+    cast_options: &CastOptions,
+    add_missing: bool,
+    string_view_compat: bool,
+) -> Result<ArrayRef, ArrowError> {
+    let (col_type, field_type) = (col.data_type(), field.data_type());
+
+    match (col_type, field_type) {
+        (DataType::Struct(_), DataType::Struct(child_fields)) => {
+            let child_struct = StructArray::from(col.into_data());
+            Ok(Arc::new(cast_struct(
+                &child_struct,
+                child_fields,
+                cast_options,
+                add_missing,
+                string_view_compat,
+            )?) as ArrayRef)
+        }
+        (DataType::List(_), DataType::List(child_fields)) => Ok(Arc::new(cast_list(
             col.as_any()
                 .downcast_ref::<GenericListArray<i32>>()
-                .ok_or(ArrowError::CastError(format!(
-                    "Expected a list for {} but got {}",
-                    field.name(),
-                    col.data_type()
-                )))?,
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "Expected a list for {} but got {}",
+                        field.name(),
+                        col_type
+                    ))
+                })?,
             child_fields,
             cast_options,
             add_missing,
-        )?) as ArrayRef)
-    } else if let (DataType::LargeList(_), DataType::LargeList(child_fields)) =
-        (col.data_type(), field.data_type())
-    {
-        Ok(Arc::new(cast_list(
+            string_view_compat,
+        )?) as ArrayRef),
+        (DataType::LargeList(_), DataType::LargeList(child_fields)) => Ok(Arc::new(cast_list(
             col.as_any()
                 .downcast_ref::<GenericListArray<i64>>()
-                .ok_or(ArrowError::CastError(format!(
-                    "Expected a list for {} but got {}",
-                    field.name(),
-                    col.data_type()
-                )))?,
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "Expected a list for {} but got {}",
+                        field.name(),
+                        col_type
+                    ))
+                })?,
             child_fields,
             cast_options,
             add_missing,
-        )?) as ArrayRef)
-    } else if let (DataType::Map(_, _), DataType::Map(child_fields, sorted)) =
-        (col.data_type(), field.data_type())
-    {
-        Ok(Arc::new(cast_map(
-            col.as_map_opt().ok_or(ArrowError::CastError(format!(
-                "Expected a map for {} but got {}",
-                field.name(),
-                col.data_type()
-            )))?,
+            string_view_compat,
+        )?) as ArrayRef),
+        (DataType::Map(_, _), DataType::Map(child_fields, sorted)) => Ok(Arc::new(cast_map(
+            col.as_map_opt().ok_or_else(|| {
+                ArrowError::CastError(format!(
+                    "Expected a map for {} but got {}",
+                    field.name(),
+                    col_type
+                ))
+            })?,
             child_fields,
             *sorted,
             cast_options,
             add_missing,
-        )?) as ArrayRef)
-    } else if is_cast_required(col.data_type(), field.data_type()) {
-        cast_with_options(col, field.data_type(), cast_options)
-    } else {
-        Ok(col.clone())
+            string_view_compat,
+        )?) as ArrayRef),
+        _ if is_cast_required(col_type, field_type) => {
+            cast_with_options(col, field_type, cast_options)
+        }
+        _ => Ok(col.clone()),
+    }
+}
+
+fn _cast_field_passthrough(
+    col: &ArrayRef,
+    field: &FieldRef,
+    cast_options: &CastOptions,
+    add_missing: bool,
+    string_view_compat: bool,
+) -> Result<ArrayRef, ArrowError> {
+    let (col_type, field_type) = (col.data_type(), field.data_type());
+
+    match (col_type, field_type) {
+        (DataType::Struct(_), DataType::Struct(child_fields)) => {
+            let child_struct = StructArray::from(col.into_data());
+            Ok(Arc::new(cast_struct(
+                &child_struct,
+                child_fields,
+                cast_options,
+                add_missing,
+                string_view_compat,
+            )?) as ArrayRef)
+        }
+        (DataType::List(_), DataType::List(child_fields) | DataType::LargeList(child_fields)) => {
+            Ok(Arc::new(cast_list(
+                col.as_any()
+                    .downcast_ref::<GenericListArray<i32>>()
+                    .ok_or_else(|| {
+                        ArrowError::CastError(format!(
+                            "Expected a list for {} but got {}",
+                            field.name(),
+                            col_type
+                        ))
+                    })?,
+                child_fields,
+                cast_options,
+                add_missing,
+                string_view_compat,
+            )?) as ArrayRef)
+        }
+        (
+            DataType::LargeList(_),
+            DataType::List(child_fields) | DataType::LargeList(child_fields),
+        ) => Ok(Arc::new(cast_list(
+            col.as_any()
+                .downcast_ref::<GenericListArray<i64>>()
+                .ok_or_else(|| {
+                    ArrowError::CastError(format!(
+                        "Expected a list for {} but got {}",
+                        field.name(),
+                        col_type
+                    ))
+                })?,
+            child_fields,
+            cast_options,
+            add_missing,
+            string_view_compat,
+        )?) as ArrayRef),
+        (DataType::Map(_, _), DataType::Map(child_fields, sorted)) => Ok(Arc::new(cast_map(
+            col.as_map_opt().ok_or_else(|| {
+                ArrowError::CastError(format!(
+                    "Expected a map for {} but got {}",
+                    field.name(),
+                    col_type
+                ))
+            })?,
+            child_fields,
+            *sorted,
+            cast_options,
+            add_missing,
+            string_view_compat,
+        )?) as ArrayRef),
+        (
+            DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View,
+        )
+        | (
+            DataType::Binary | DataType::BinaryView | DataType::LargeBinary,
+            DataType::Binary | DataType::LargeBinary | DataType::BinaryView,
+        ) => Ok(col.clone()),
+        _ if is_cast_required(col_type, field_type) => {
+            cast_with_options(col, field_type, cast_options)
+        }
+        _ => Ok(col.clone()),
     }
 }
 
@@ -281,6 +554,7 @@ pub fn cast_record_batch(
     target_schema: ArrowSchemaRef,
     safe: bool,
     add_missing: bool,
+    string_view_compat: bool,
 ) -> DeltaResult<RecordBatch> {
     let cast_options = CastOptions {
         safe,
@@ -292,7 +566,14 @@ pub fn cast_record_batch(
         batch.columns().to_owned(),
         None,
     );
-    let struct_array = cast_struct(&s, target_schema.fields(), &cast_options, add_missing)?;
+    let struct_array = cast_struct(
+        &s,
+        target_schema.fields(),
+        &cast_options,
+        add_missing,
+        string_view_compat,
+    )?;
+
     Ok(RecordBatch::try_new_with_options(
         target_schema,
         struct_array.columns().to_vec(),
@@ -313,13 +594,13 @@ mod tests {
     };
     use arrow::buffer::{Buffer, NullBuffer};
     use arrow_schema::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
+    use delta_kernel::schema::MetadataValue;
     use itertools::Itertools;
 
     use crate::kernel::{
         ArrayType as DeltaArrayType, DataType as DeltaDataType, StructField as DeltaStructField,
         StructType as DeltaStructType,
     };
-    use crate::operations::cast::MetadataValue;
     use crate::operations::cast::{cast_record_batch, is_cast_required};
 
     #[test]
@@ -412,7 +693,7 @@ mod tests {
         )]);
         let target_schema = Arc::new(Schema::new(fields)) as SchemaRef;
 
-        let result = cast_record_batch(&record_batch, target_schema, false, false);
+        let result = cast_record_batch(&record_batch, target_schema, false, false, false);
 
         let schema = result.unwrap().schema();
         let field = schema.column_with_name("list_column").unwrap().1;
@@ -476,7 +757,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = cast_record_batch(&batch, schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -510,7 +791,7 @@ mod tests {
             Field::new("field1", DataType::Int32, true),
             Field::new("field2", DataType::Utf8, true),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -542,7 +823,7 @@ mod tests {
             Field::new("field1", DataType::Int32, false),
             Field::new("field2", DataType::Utf8, true),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -572,7 +853,7 @@ mod tests {
             Field::new("field1", DataType::Int32, false),
             Field::new("field2", DataType::Utf8, false),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true);
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false);
         assert!(result.is_err());
     }
 
@@ -606,7 +887,7 @@ mod tests {
                 true,
             ),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -655,7 +936,7 @@ mod tests {
                 true,
             ),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -695,7 +976,7 @@ mod tests {
                 true,
             ),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(
@@ -741,7 +1022,7 @@ mod tests {
                 true,
             ),
         ]));
-        let result = cast_record_batch(&batch, new_schema.clone(), false, true).unwrap();
+        let result = cast_record_batch(&batch, new_schema.clone(), false, true, false).unwrap();
         assert_eq!(result.schema(), new_schema);
         assert_eq!(result.num_columns(), 2);
         assert_eq!(

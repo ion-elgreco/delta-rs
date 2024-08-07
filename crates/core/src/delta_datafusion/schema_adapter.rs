@@ -57,7 +57,8 @@ pub(crate) struct SchemaMapping {
 
 impl SchemaMapper for SchemaMapping {
     fn map_batch(&self, batch: RecordBatch) -> datafusion_common::Result<RecordBatch> {
-        let record_batch = cast_record_batch(&batch, self.table_schema.clone(), false, true)?;
+        let record_batch =
+            cast_record_batch(&batch, self.table_schema.clone(), false, true, false)?;
         Ok(record_batch)
     }
 
@@ -74,7 +75,7 @@ impl SchemaMapper for SchemaMapping {
                 .collect::<Vec<_>>(),
         ));
 
-        let record_batch = cast_record_batch(&batch, partial_table_schema, false, true)?;
+        let record_batch = cast_record_batch(&batch, partial_table_schema, false, true, false)?;
         Ok(record_batch)
     }
 }
