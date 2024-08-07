@@ -26,7 +26,7 @@ debug = true
 debug = "line-tables-only"
 
 [workspace.dependencies]
-delta_kernel = { git = "https://github.com/delta-incubator/delta-kernel-rs", rev = "e0a2e5e7a455f6bdf816afff1783bb61a2f4cb8c"}
+delta_kernel = { version = "0.3"}
 # delta_kernel = { path = "../delta-kernel-rs/kernel" }
 
 # arrow
