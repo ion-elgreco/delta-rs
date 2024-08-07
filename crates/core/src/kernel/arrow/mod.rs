@@ -359,11 +359,15 @@ fn null_count_schema_for_fields(dest: &mut Vec<ArrowField>, f: &ArrowField) {
 
 #[cfg(test)]
 mod tests {
+    use arrow::array::ArrayData;
+    use arrow_array::{
+        make_array, Array, ArrayRef, MapArray, RecordBatch, StringArray, StructArray,
+    };
+    use arrow_buffer::{Buffer, ToByteSlice};
+    use arrow_schema::Field;
+    use delta_kernel::schema::{DataType, MapType, PrimitiveType, StructField, StructType};
     use std::collections::HashMap;
     use std::sync::Arc;
-
-    use arrow_array::{MapArray, RecordBatch};
-    use delta_kernel::schema::{DataType, MapType, PrimitiveType, StructField, StructType};
 
     use super::*;
 
@@ -521,12 +525,35 @@ mod tests {
         let entry_offsets = vec![0u32, 1, 1, 4, 5, 5];
         let num_rows = keys.len();
 
-        let map_array = MapArray::new_from_strings(
-            keys.into_iter(),
-            &arrow::array::BinaryArray::from(values),
-            entry_offsets.as_slice(),
-        )
-        .expect("Could not create a map array");
+        let entry_offsets_buffer = Buffer::from(entry_offsets.as_slice().to_byte_slice());
+        let keys_data = StringArray::from_iter_values(keys);
+        let values = &arrow::array::BinaryArray::from(values);
+        let keys_field = Arc::new(Field::new("key", ArrowDataType::Utf8, false));
+        let values_field = Arc::new(Field::new(
+            "value",
+            values.data_type().clone(),
+            values.null_count() > 0,
+        ));
+
+        let entry_struct = StructArray::from(vec![
+            (keys_field, Arc::new(keys_data) as ArrayRef),
+            (values_field, make_array(values.to_data())),
+        ]);
+
+        let map_data_type = ArrowDataType::Map(
+            Arc::new(Field::new(
+                "key_value",
+                entry_struct.data_type().clone(),
+                false,
+            )),
+            false,
+        );
+        let map_data = ArrayData::builder(map_data_type)
+            .len(entry_offsets.len() - 1)
+            .add_buffer(entry_offsets_buffer)
+            .add_child_data(entry_struct.into_data())
+            .build()
+            .expect("Could not build array map data");
 
         let schema =
             <arrow::datatypes::Schema as TryFrom<&StructType>>::try_from(&StructType::new(vec![
@@ -542,8 +569,9 @@ mod tests {
             ]))
             .expect("Could not get schema");
 
-        let record_batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(map_array)])
-            .expect("Failed to create RecordBatch");
+        let record_batch =
+            RecordBatch::try_new(Arc::new(schema), vec![Arc::new(MapArray::from(map_data))])
+                .expect("Failed to create RecordBatch");
 
         assert_eq!(record_batch.num_columns(), 1);
         assert_eq!(record_batch.num_rows(), num_rows);
