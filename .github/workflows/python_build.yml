@@ -30,40 +30,6 @@ jobs:
       - name: Check Rust
         run: make check-rust
 
-  test-minimal:
-    name: Python Build (Python 3.8 PyArrow 8.0.0)
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-C debuginfo=line-tables-only"
-      CARGO_INCREMENTAL: 0
-
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Environment
-        uses: ./.github/actions/setup-env
-        with:
-          python-version: 3.8
-
-      - name: Build and install deltalake
-        run: |
-          python -m venv venv
-          source venv/bin/activate
-          make setup
-          # Install minimum PyArrow version
-          pip install -e .[pandas,devel] pyarrow==8.0.0
-        env:
-          RUSTFLAGS: "-C debuginfo=line-tables-only"
-
-      - name: Run tests
-        run: |
-          source venv/bin/activate
-          make unit-test
-
-    # - name: Run Integration tests
-    #   run: |
-    #     py.test --cov tests -m integration
-
   test:
     name: Python Build (Python 3.10 PyArrow latest)
     runs-on: ubuntu-latest

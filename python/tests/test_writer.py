@@ -13,7 +13,6 @@ from unittest.mock import Mock
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
-from packaging import version
 from pyarrow.dataset import ParquetFileFormat, ParquetReadOptions, dataset
 from pyarrow.lib import RecordBatchReader
 
@@ -710,9 +709,8 @@ def test_writer_stats(existing_table: DeltaTable, sample_data: pa.Table):
         },
     }
     # PyArrow added support for decimal and date32 in 8.0.0
-    if version.parse(pa.__version__).major >= 8:
-        expected_mins["decimal"] = 10.0
-        expected_mins["date32"] = "2022-01-01"
+    expected_mins["decimal"] = 10.0
+    expected_mins["date32"] = "2022-01-01"
 
     assert stats["minValues"] == expected_mins
 
@@ -730,9 +728,8 @@ def test_writer_stats(existing_table: DeltaTable, sample_data: pa.Table):
         "struct": {"x": 4, "y": "4"},
     }
     # PyArrow added support for decimal and date32 in 8.0.0
-    if version.parse(pa.__version__).major >= 8:
-        expected_maxs["decimal"] = 14.0
-        expected_maxs["date32"] = "2022-01-05"
+    expected_maxs["decimal"] = 14.0
+    expected_maxs["date32"] = "2022-01-05"
 
     assert stats["maxValues"] == expected_maxs
 
@@ -1323,9 +1320,6 @@ def test_large_arrow_types(tmp_path: pathlib.Path):
     assert table.schema == dt.schema().to_pyarrow(as_large_types=True)
 
 
-@pytest.mark.skipif(
-    int(pa.__version__.split(".")[0]) < 10, reason="map casts require pyarrow >= 10"
-)
 def test_large_arrow_types_dataset_as_large_types(tmp_path: pathlib.Path):
     pylist = [
         {"name": "Joey", "gender": b"M", "arr_type": ["x", "y"], "dict": {"a": b"M"}},
@@ -1351,9 +1345,6 @@ def test_large_arrow_types_dataset_as_large_types(tmp_path: pathlib.Path):
     assert union_ds.to_table().shape[0] == 4
 
 
-@pytest.mark.skipif(
-    int(pa.__version__.split(".")[0]) < 10, reason="map casts require pyarrow >= 10"
-)
 def test_large_arrow_types_explicit_scan_schema(tmp_path: pathlib.Path):
     pylist = [
         {"name": "Joey", "gender": b"M", "arr_type": ["x", "y"], "dict": {"a": b"M"}},

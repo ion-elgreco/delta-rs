@@ -223,8 +223,8 @@ def test_delta_schema():
     assert schema_without_metadata == Schema.from_pyarrow(pa_schema)
 
 
-def _pyarrow_view_tuples():
-    return [
+def _generate_test_tuples():
+    test_tuples = [
         (
             pa.schema([("some_int", pa.uint32()), ("some_string", pa.string_view())]),
             pa.schema([("some_int", pa.int32()), ("some_string", pa.string_view())]),
@@ -245,11 +245,6 @@ def _pyarrow_view_tuples():
             ),
             ArrowSchemaConversionMode.PASSTHROUGH,
         ),
-    ]
-
-
-def _generate_test_tuples():
-    test_tuples = [
         (
             pa.schema([("some_int", pa.uint32()), ("some_string", pa.string())]),
             pa.schema([("some_int", pa.int32()), ("some_string", pa.string())]),
@@ -522,11 +517,7 @@ def _generate_test_tuples():
         ),
     ]
 
-    if int(pa.__version__.split(".")[0]) < 16:
-        return test_tuples
-    else:
-        test_tuples.extend(_pyarrow_view_tuples())
-        return test_tuples
+    return test_tuples
 
 
 @pytest.mark.parametrize(

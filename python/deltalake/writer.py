@@ -64,7 +64,6 @@ except ModuleNotFoundError:
 else:
     _has_pandas = True
 
-PYARROW_MAJOR_VERSION = int(pa.__version__.split(".", maxsplit=1)[0])
 DEFAULT_DATA_SKIPPING_NUM_INDEX_COLS = 32
 
 DTYPE_MAP = {
@@ -394,19 +393,9 @@ def write_deltalake(
 
         if partition_by:
             table_schema: pa.Schema = schema
-            if PYARROW_MAJOR_VERSION < 12:
-                partition_schema = pa.schema(
-                    [
-                        pa.field(
-                            name, _large_to_normal_dtype(table_schema.field(name).type)
-                        )
-                        for name in partition_by
-                    ]
-                )
-            else:
-                partition_schema = pa.schema(
-                    [table_schema.field(name) for name in partition_by]
-                )
+            partition_schema = pa.schema(
+                [table_schema.field(name) for name in partition_by]
+            )
             partitioning = ds.partitioning(partition_schema, flavor="hive")
         else:
             partitioning = None
@@ -421,18 +410,10 @@ def write_deltalake(
                 columns_to_collect_stats=stats_cols,
             )
 
-            # PyArrow added support for written_file.size in 9.0.0
-            if PYARROW_MAJOR_VERSION >= 9:
-                size = written_file.size
-            elif filesystem is not None:
-                size = filesystem.get_file_info([path])[0].size
-            else:
-                size = 0
-
             add_actions.append(
                 AddAction(
                     path,
-                    size,
+                    written_file.size,
                     partition_values,
                     int(datetime.now().timestamp() * 1000),
                     True,
@@ -847,19 +828,6 @@ def get_file_stats_from_metadata(
                 # Min and Max are recorded in physical type, not logical type
                 # https://stackoverflow.com/questions/66753485/decoding-parquet-min-max-statistics-for-decimal-type
                 # TODO: Add logic to decode physical type for DATE, DECIMAL
-                logical_type = (
-                    metadata.row_group(0)
-                    .column(column_idx)
-                    .statistics.logical_type.type
-                )
-
-                if PYARROW_MAJOR_VERSION < 8 and logical_type not in [
-                    "STRING",
-                    "INT",
-                    "TIMESTAMP",
-                    "NONE",
-                ]:
-                    continue
 
                 minimums = (
                     group.column(column_idx).statistics.min
