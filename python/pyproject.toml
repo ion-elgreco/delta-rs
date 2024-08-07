@@ -19,7 +19,6 @@ classifiers = [
 ]
 dependencies = [
     "pyarrow>=16",
-    "pyarrow-hotfix",    
 ]
 
 [project.optional-dependencies]
