@@ -381,8 +381,8 @@ async fn write_execution_plan_with_predicate(
     writer_stats_config: WriterStatsConfig,
     sender: Option<Sender<RecordBatch>>,
 ) -> DeltaResult<Vec<Action>> {
-    // We always take the plan Schema since the data may contain Large/View arrow types, the schema
-    // was prior constructed with this in mind. Also cast_record_batch allows this passthrough
+    // We always take the plan Schema since the data may contain Large/View arrow types,
+    // the schema and batches were prior constructed with this in mind.
     let schema: ArrowSchemaRef = plan.schema();
     let checker = if let Some(snapshot) = snapshot {
         DeltaDataChecker::new(snapshot)
