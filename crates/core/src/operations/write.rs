@@ -61,7 +61,7 @@ use crate::delta_datafusion::{DataFusionMixins, DeltaDataChecker};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Action, Add, AddCDCFile, Metadata, PartitionsExt, Remove, StructType};
 use crate::logstore::LogStoreRef;
-use crate::operations::cast::{cast_record_batch, merge_schema};
+use crate::operations::cast::{cast_record_batch, merge_schema::merge_arrow_schema};
 use crate::protocol::{DeltaOperation, SaveMode};
 use crate::storage::ObjectStoreRef;
 use crate::table::state::DeltaTableState;
@@ -832,16 +832,12 @@ impl std::future::IntoFuture for WriteBuilder {
                         {
                             schema_drift = true;
                             if this.mode == SaveMode::Overwrite
-                                && this.schema_mode == Some(SchemaMode::Merge)
-                            {
-                                new_schema =
-                                    Some(merge_schema(table_schema.clone(), schema.clone())?);
-                            } else if this.mode == SaveMode::Overwrite && this.schema_mode.is_some()
+                                && this.schema_mode == Some(SchemaMode::Overwrite)
                             {
                                 new_schema = None // we overwrite anyway, so no need to cast
                             } else if this.schema_mode == Some(SchemaMode::Merge) {
                                 new_schema =
-                                    Some(merge_schema(table_schema.clone(), schema.clone())?);
+                                    Some(merge_arrow_schema(table_schema.clone(), schema.clone())?);
                             } else {
                                 return Err(schema_err.into());
                             }
@@ -850,9 +846,11 @@ impl std::future::IntoFuture for WriteBuilder {
                         {
                             new_schema = None // we overwrite anyway, so no need to cast
                         } else {
-                            // We take the table schema to explicility cast batches, required
-                            // when we first write int and then write utf8, see test_write_different_types
-                            new_schema = Some(table_schema);
+                            // Schema needs to be merged so that utf8/binary/list types are preserved from the batch side if both table
+                            // and batch contains such type. Other types are preserved from the table side.
+                            // At this stage it will never introduce more fields since try_cast_batch passed correctly.
+                            new_schema =
+                                Some(merge_arrow_schema(table_schema.clone(), schema.clone())?);
                         }
                     }
                     let data = if !partition_columns.is_empty() {
@@ -864,8 +862,7 @@ impl std::future::IntoFuture for WriteBuilder {
                                     &batch,
                                     new_schema,
                                     this.safe_cast,
-                                    true,
-                                    true,
+                                    schema_drift, // Schema drifted so we have to add the missing columns/structfields.
                                 )?,
                                 None => batch,
                             };
@@ -897,8 +894,7 @@ impl std::future::IntoFuture for WriteBuilder {
                                         &batch,
                                         new_schema.clone(),
                                         this.safe_cast,
-                                        true,
-                                        true,
+                                        schema_drift, // Schema drifted so we have to add the missing columns/structfields.
                                     )?);
                                 }
                                 vec![new_batches]

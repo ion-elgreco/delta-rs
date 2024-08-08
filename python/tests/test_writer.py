@@ -255,17 +255,6 @@ def test_update_schema_rust_writer_append(existing_table: DeltaTable):
             schema_mode="overwrite",
             engine="rust",
         )
-    with pytest.raises(
-        SchemaMismatchError,
-        match="Schema error: Fail to merge schema field 'utf8' because the from data_type = Int64 does not equal Utf8\nSchema error: Fail to merge schema field 'utf8' because the from data_type = Int64 does not equal Utf8",
-    ):
-        write_deltalake(
-            existing_table,
-            pa.table({"utf8": pa.array([1, 2, 3])}),
-            mode="append",
-            schema_mode="merge",
-            engine="rust",
-        )
     write_deltalake(
         existing_table,
         pa.table({"x2": pa.array([1, 2, 3])}),
@@ -273,6 +262,37 @@ def test_update_schema_rust_writer_append(existing_table: DeltaTable):
         schema_mode="merge",
         engine="rust",
     )
+
+
+def test_write_type_castable_types(existing_table: DeltaTable):
+    write_deltalake(
+        existing_table,
+        pa.table({"utf8": pa.array([1, 2, 3])}),
+        mode="append",
+        schema_mode="merge",
+        engine="rust",
+    )
+    with pytest.raises(
+        Exception, match="Cast error: Cannot cast string 'hello' to value of Int8 type"
+    ):
+        write_deltalake(
+            existing_table,
+            pa.table({"int8": pa.array(["hello", "2", "3"])}),
+            mode="append",
+            schema_mode="merge",
+            engine="rust",
+        )
+
+    with pytest.raises(
+        Exception, match="Cast error: Can't cast value 1000 to type Int8"
+    ):
+        write_deltalake(
+            existing_table,
+            pa.table({"int8": pa.array([1000, 100, 10])}),
+            mode="append",
+            schema_mode="merge",
+            engine="rust",
+        )
 
 
 def test_update_schema_rust_writer_invalid(existing_table: DeltaTable):
@@ -1298,7 +1318,8 @@ def test_max_partitions_exceeding_fragment_should_fail(
         )
 
 
-def test_large_arrow_types(tmp_path: pathlib.Path):
+@pytest.mark.parametrize("engine", ["rust", "pyarrow"])
+def test_large_arrow_types(tmp_path: pathlib.Path, engine):
     pylist = [
         {"name": "Joey", "gender": b"M", "arr_type": ["x", "y"], "dict": {"a": b"M"}},
         {"name": "Ivan", "gender": b"F", "arr_type": ["x", "z"]},
@@ -1314,7 +1335,9 @@ def test_large_arrow_types(tmp_path: pathlib.Path):
     )
     table = pa.Table.from_pylist(pylist, schema=schema)
 
-    write_deltalake(tmp_path, table)
+    write_deltalake(tmp_path, table, mode="append", engine=engine, large_dtypes=True)
+    write_deltalake(tmp_path, table, mode="append", engine=engine, large_dtypes=True)
+    write_deltalake(tmp_path, table, mode="append", engine=engine, large_dtypes=True)
 
     dt = DeltaTable(tmp_path)
     assert table.schema == dt.schema().to_pyarrow(as_large_types=True)

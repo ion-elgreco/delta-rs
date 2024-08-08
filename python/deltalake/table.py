@@ -876,9 +876,6 @@ class DeltaTable:
         error_on_type_mismatch: bool = True,
         writer_properties: Optional[WriterProperties] = None,
         large_dtypes: bool = False,
-        arrow_schema_conversion_mode: Literal[
-            "normal", "large", "passthrough"
-        ] = "normal",
         custom_metadata: Optional[Dict[str, str]] = None,
         post_commithook_properties: Optional[PostCommitHookProperties] = None,
     ) -> "TableMerger":
@@ -893,7 +890,7 @@ class DeltaTable:
             target_alias: Alias for the target table
             error_on_type_mismatch: specify if merge will return error if data types are mismatching :default = True
             writer_properties: Pass writer properties to the Rust parquet writer
-            large_dtypes: Deprecated, use arrow_schema_conversion_mode instead.
+            large_dtypes: Deprecated, will be removed in 1.0
             arrow_schema_conversion_mode: Large converts all types of data schema into Large Arrow types, passthrough keeps string/binary/list types untouched
             custom_metadata: custom metadata that will be added to the transaction commit.
             post_commithook_properties: properties for the post commit hook. If None, default values are used.
@@ -902,17 +899,12 @@ class DeltaTable:
             TableMerger: TableMerger Object
         """
         if large_dtypes:
-            arrow_schema_conversion_mode = "large"
-
             warnings.warn(
-                "large_dtypes is deprecated, use arrow_schema_conversion_mode instead. ",
+                "large_dtypes is deprecated",
                 category=DeprecationWarning,
                 stacklevel=2,
             )
-
-        conversion_mode = ArrowSchemaConversionMode.from_str(
-            arrow_schema_conversion_mode
-        )
+        conversion_mode = ArrowSchemaConversionMode.PASSTHROUGH
 
         from .schema import (
             convert_pyarrow_dataset,
