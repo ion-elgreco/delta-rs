@@ -325,6 +325,7 @@ impl PartitionWriter {
                     let merged = merge_arrow_schema(
                         self.arrow_schema.clone(),
                         record_batch.schema().clone(),
+                        true,
                     )?;
                     self.arrow_schema = merged;
 

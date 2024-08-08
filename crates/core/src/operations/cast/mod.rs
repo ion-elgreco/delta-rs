@@ -222,7 +222,7 @@ mod tests {
             true,
         )]));
 
-        let result = merge_arrow_schema(left_schema, right_schema).unwrap();
+        let result = merge_arrow_schema(left_schema, right_schema, true).unwrap();
         assert_eq!(result.fields().len(), 1);
         let delta_type: DeltaDataType = result.fields()[0].data_type().try_into().unwrap();
         assert_eq!(delta_type, DeltaDataType::STRING);
@@ -272,7 +272,7 @@ mod tests {
             true,
         )]));
 
-        let result = merge_arrow_schema(left_schema, right_schema).unwrap();
+        let result = merge_arrow_schema(left_schema, right_schema, true).unwrap();
         assert_eq!(result.fields().len(), 1);
         let delta_type: DeltaDataType = result.fields()[0].data_type().try_into().unwrap();
         assert_eq!(

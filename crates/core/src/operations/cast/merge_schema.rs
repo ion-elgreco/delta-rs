@@ -1,12 +1,10 @@
 //! Provide schema merging for delta schemas
 //!
-use crate::{
-    kernel::{ArrayType, DataType as DeltaDataType, MapType, StructField, StructType},
-    table,
-};
+use crate::kernel::{ArrayType, DataType as DeltaDataType, MapType, StructField, StructType};
 use arrow::datatypes::DataType::Dictionary;
 use arrow_schema::{
-    ArrowError, DataType, Field as ArrowField, Schema as ArrowSchema, SchemaRef as ArrowSchemaRef,
+    ArrowError, DataType, Field as ArrowField, Fields, Schema as ArrowSchema,
+    SchemaRef as ArrowSchemaRef,
 };
 use std::collections::HashMap;
 
@@ -117,6 +115,7 @@ pub(crate) fn merge_delta_struct(
 pub(crate) fn merge_arrow_field(
     left: &ArrowField,
     right: &ArrowField,
+    preserve_new_fields: bool,
 ) -> Result<ArrowField, ArrowError> {
     if left == right {
         return Ok(left.clone());
@@ -206,7 +205,8 @@ pub(crate) fn merge_arrow_field(
             DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
             DataType::LargeList(right_child_fields),
         ) => {
-            let merged = merge_arrow_field(left_child_fields, right_child_fields)?;
+            let merged =
+                merge_arrow_field(left_child_fields, right_child_fields, preserve_new_fields)?;
             Ok(ArrowField::new(
                 right.name(),
                 DataType::LargeList(merged.into()),
@@ -217,10 +217,20 @@ pub(crate) fn merge_arrow_field(
             DataType::List(left_child_fields) | DataType::LargeList(left_child_fields),
             DataType::List(right_child_fields),
         ) => {
-            let merged = merge_arrow_field(left_child_fields, right_child_fields)?;
+            let merged =
+                merge_arrow_field(left_child_fields, right_child_fields, preserve_new_fields)?;
             Ok(ArrowField::new(
                 right.name(),
                 DataType::List(merged.into()),
+                right.is_nullable() || left.is_nullable(),
+            ))
+        }
+        (DataType::Struct(left_child_fields), DataType::Struct(right_child_fields)) => {
+            let merged =
+                merge_arrow_vec_fields(left_child_fields, right_child_fields, preserve_new_fields)?;
+            Ok(ArrowField::new(
+                right.name(),
+                DataType::Struct(merged.into()),
                 right.is_nullable() || left.is_nullable(),
             ))
         }
@@ -228,31 +238,73 @@ pub(crate) fn merge_arrow_field(
             let mut new_field = left.clone();
             match new_field.try_merge(right) {
                 Ok(()) => (),
-                Err(_) => new_field = left.clone(),
-                // Sometimes fields can't be merged because they are not the same types
-                // So table has int32, but batch int64. We want the preserve the table type
-                // At later stage we will call cast_record_batch which will cast the batch int64->int32
-                // This is desired behaviour so we can have flexibility in the batch data types
-                // But preserve the correct table and parquet types
+                Err(_) => {
+                    // We cannot keep the table field here, there is some weird behavior where
+                    // Decimal(5,1) can be safely casted into Decimal(4,1) with out loss of data
+                    // Then our stats parser fails to parse this decimal(1000.1) into Decimal(4,1)
+                    // even though datafusion was able to write it into parquet
+                    // We manually have to check if the decimal in the recordbatch is a subset of the table decimal
+                    match (right.data_type(), new_field.data_type()) {
+                        (
+                            DataType::Decimal128(left_precision, left_scale)
+                            | DataType::Decimal256(left_precision, left_scale),
+                            DataType::Decimal128(right_precision, right_scale),
+                        ) => {
+                            if !(left_precision <= right_precision && left_scale <= right_scale) {
+                                return Err(ArrowError::SchemaError(format!(
+                                    "Cannot merge field {} from {} to {}",
+                                    right.name(),
+                                    right.data_type(),
+                                    new_field.data_type()
+                                )));
+                            }
+                        }
+                        (_, _) => (),
+                    };
+                }
             };
             Ok(new_field)
         }
     }
 }
 
-/// Merges Arrow Table schema and Arrow Batch Schema, by allowing Large/View Types to passthrough
+/// Merges Arrow Table schema and Arrow Batch Schema, by allowing Large/View Types to passthrough.
+// Sometimes fields can't be merged because they are not the same types. So table has int32,
+// but batch int64. We want the preserve the table type. At later stage we will call cast_record_batch
+// which will cast the batch int64->int32. This is desired behaviour so we can have flexibility
+// in the batch data types. But preserve the correct table and parquet types.
+//
+// Preserve_new_fields can also be disabled if you just want to only use the passthrough functionality
 pub(crate) fn merge_arrow_schema(
     table_schema: ArrowSchemaRef,
     batch_schema: ArrowSchemaRef,
+    preserve_new_fields: bool,
 ) -> Result<ArrowSchemaRef, ArrowError> {
-    let mut errors = Vec::with_capacity(table_schema.fields().len());
-    let merged_fields: Result<Vec<ArrowField>, ArrowError> = table_schema
-        .fields()
+    let table_fields = table_schema.fields();
+    let batch_fields = batch_schema.fields();
+
+    let merged_schema = ArrowSchema::new(merge_arrow_vec_fields(
+        table_fields,
+        batch_fields,
+        preserve_new_fields,
+    )?)
+    .into();
+    Ok(merged_schema)
+}
+
+fn merge_arrow_vec_fields(
+    table_fields: &Fields,
+    batch_fields: &Fields,
+    preserve_new_fields: bool,
+) -> Result<Vec<ArrowField>, ArrowError> {
+    let mut errors = Vec::with_capacity(table_fields.len());
+    let merged_fields: Result<Vec<ArrowField>, ArrowError> = table_fields
         .iter()
         .map(|field| {
-            let right_field = batch_schema.field_with_name(field.name());
-            if let Ok(right_field) = right_field {
-                let field_or_not = merge_arrow_field(field.as_ref(), right_field);
+            let right_field = batch_fields.find(field.name());
+            if let Some((_, right_field)) = right_field {
+                let field_or_not =
+                    merge_arrow_field(field.as_ref(), right_field, preserve_new_fields);
                 match field_or_not {
                     Err(e) => {
                         errors.push(e.to_string());
@@ -272,17 +324,18 @@ pub(crate) fn merge_arrow_schema(
         .collect();
     match merged_fields {
         Ok(mut fields) => {
-            for field in batch_schema.fields() {
-                if !table_schema.field_with_name(field.name()).is_ok() {
-                    fields.push(field.as_ref().clone());
+            if preserve_new_fields {
+                for field in batch_fields.into_iter() {
+                    if table_fields.find(field.name()).is_none() {
+                        fields.push(field.as_ref().clone());
+                    }
                 }
             }
-            let merged_schema = ArrowSchema::new(fields).into();
-            Ok(merged_schema)
+            return Ok(fields);
         }
         Err(e) => {
             errors.push(e.to_string());
-            Err(ArrowError::SchemaError(errors.join("\n")))
+            return Err(ArrowError::SchemaError(errors.join("\n")));
         }
     }
 }

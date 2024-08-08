@@ -836,8 +836,11 @@ impl std::future::IntoFuture for WriteBuilder {
                             {
                                 new_schema = None // we overwrite anyway, so no need to cast
                             } else if this.schema_mode == Some(SchemaMode::Merge) {
-                                new_schema =
-                                    Some(merge_arrow_schema(table_schema.clone(), schema.clone())?);
+                                new_schema = Some(merge_arrow_schema(
+                                    table_schema.clone(),
+                                    schema.clone(),
+                                    schema_drift,
+                                )?);
                             } else {
                                 return Err(schema_err.into());
                             }
@@ -849,8 +852,11 @@ impl std::future::IntoFuture for WriteBuilder {
                             // Schema needs to be merged so that utf8/binary/list types are preserved from the batch side if both table
                             // and batch contains such type. Other types are preserved from the table side.
                             // At this stage it will never introduce more fields since try_cast_batch passed correctly.
-                            new_schema =
-                                Some(merge_arrow_schema(table_schema.clone(), schema.clone())?);
+                            new_schema = Some(merge_arrow_schema(
+                                table_schema.clone(),
+                                schema.clone(),
+                                schema_drift,
+                            )?);
                         }
                     }
                     let data = if !partition_columns.is_empty() {
