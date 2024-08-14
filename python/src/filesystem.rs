@@ -10,6 +10,7 @@ use pyo3::types::{IntoPyDict, PyBytes, PyType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 5 * 1024 * 1024;
 
@@ -282,13 +283,11 @@ impl DeltaFileSystemHandler {
         };
 
         let path = Self::parse_path(&path);
-        let file = rt()
-            .block_on(ObjectInputFile::try_new(
+        let file = ObjectInputFile::try_new(
                 self.inner.clone(),
                 path,
                 size.copied(),
-            ))
-            .map_err(PythonError::from)?;
+            ).map_err(PythonError::from)?;
         Ok(file)
     }
 
@@ -354,17 +353,20 @@ pub struct ObjectInputFile {
 }
 
 impl ObjectInputFile {
-    pub async fn try_new(
+    pub fn try_new(
         store: Arc<DynObjectStore>,
         path: Path,
         size: Option<i64>,
     ) -> Result<Self, ObjectStoreError> {
         // If file size is not given, issue a HEAD Object to get the content-length and ensure any
         // errors (e.g. file not found) don't wait until the first read() call.
+        dbg!((&path, &size));
         let content_length = match size {
             Some(s) => s,
             None => {
-                let meta = store.head(&path).await?;
+                let meta = rt()
+                    .block_on(
+                        store.head(&path))?;
                 meta.size as i64
             }
         };
@@ -466,6 +468,10 @@ impl ObjectInputFile {
     #[pyo3(signature = (nbytes = None))]
     fn read<'py>(&mut self, nbytes: Option<i64>, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         self.check_closed()?;
+
+        let now = SystemTime::now();
+        dbg!((&self.path, &nbytes));
+
         let range = match nbytes {
             Some(len) => {
                 let end = i64::min(self.pos + len, self.content_length) as usize;
@@ -488,6 +494,16 @@ impl ObjectInputFile {
             })?
         } else {
             "".into()
+        };
+        match now.elapsed() {
+            Ok(elapsed) => {
+                // it prints '2'
+                dbg!(elapsed.as_secs());
+            }
+            Err(e) => {
+                // an error occurred!
+                dbg!("Error: {e:?}");
+            }
         };
         // TODO: PyBytes copies the buffer. If we move away from the limited CPython
         // API (the stable C API), we could implement the buffer protocol for
