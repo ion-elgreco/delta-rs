@@ -657,6 +657,9 @@ impl MergePlan {
         min_commit_interval: Option<Duration>,
         commit_properties: CommitProperties,
     ) -> Result<Metrics, DeltaTableError> {
+        use tokio::runtime::{Runtime};
+        
+        let rewrite_rt = Runtime::new()?;
         let operations = std::mem::take(&mut self.operations);
 
         let stream = match operations {
@@ -687,7 +690,8 @@ impl MergePlan {
                         .try_flatten()
                         .boxed();
 
-                    let rewrite_result = tokio::task::spawn(Self::rewrite_files(
+
+                    let rewrite_result = rewrite_rt.spawn(Self::rewrite_files(
                         self.task_parameters.clone(),
                         partition,
                         files,
@@ -720,7 +724,7 @@ impl MergePlan {
                 futures::stream::iter(bins)
                     .map(move |(_, (partition, files))| {
                         let batch_stream = Self::read_zorder(files.clone(), exec_context.clone());
-                        let rewrite_result = tokio::task::spawn(Self::rewrite_files(
+                        let rewrite_result = rewrite_rt.spawn(Self::rewrite_files(
                             task_parameters.clone(),
                             partition,
                             files,
