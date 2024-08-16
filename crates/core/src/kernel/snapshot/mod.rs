@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Cursor};
 use std::sync::Arc;
 
+use futures::sink::drain;
 use ::serde::{Deserialize, Serialize};
 use arrow_array::RecordBatch;
 use futures::stream::BoxStream;
@@ -208,6 +209,7 @@ impl Snapshot {
         &self,
         store: Arc<dyn ObjectStore>,
         visitors: &'a mut Vec<Box<dyn ReplayVisitor>>,
+        drain_cache: bool,
     ) -> DeltaResult<ReplayStream<'a, BoxStream<'_, DeltaResult<RecordBatch>>>> {
         let mut schema_actions: HashSet<_> =
             visitors.iter().flat_map(|v| v.required_actions()).collect();
@@ -222,6 +224,7 @@ impl Snapshot {
                     .collect(),
             ),
             &self.config,
+            drain_cache,
         );
 
         schema_actions.insert(ActionType::Remove);
@@ -234,6 +237,7 @@ impl Snapshot {
                     .collect(),
             ),
             &self.config,
+            drain_cache,
         )?;
 
         ReplayStream::try_new(log_stream, checkpoint_stream, self, visitors)

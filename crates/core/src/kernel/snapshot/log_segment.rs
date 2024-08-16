@@ -237,6 +237,7 @@ impl LogSegment {
         store: Arc<dyn ObjectStore>,
         read_schema: &Schema,
         config: &DeltaTableConfig,
+        drain_cache: bool,
     ) -> DeltaResult<BoxStream<'_, DeltaResult<RecordBatch>>> {
         let decoder = json::get_decoder(Arc::new(read_schema.try_into()?), config)?;
         let stream = futures::stream::iter(self.commit_files.iter())
@@ -253,6 +254,7 @@ impl LogSegment {
         store: Arc<dyn ObjectStore>,
         read_schema: &Schema,
         config: &DeltaTableConfig,
+        drain_cache: bool,
     ) -> BoxStream<'_, DeltaResult<RecordBatch>> {
         let batch_size = config.log_batch_size;
         let read_schema = Arc::new(read_schema.clone());
@@ -314,7 +316,7 @@ impl LogSegment {
         let mut maybe_protocol = None;
         let mut maybe_metadata = None;
 
-        let mut commit_stream = self.commit_stream(store.clone(), &READ_SCHEMA, config)?;
+        let mut commit_stream = self.commit_stream(store.clone(), &READ_SCHEMA, config, false)?;
         while let Some(batch) = commit_stream.next().await {
             let batch = batch?;
             if maybe_protocol.is_none() {
@@ -332,7 +334,7 @@ impl LogSegment {
             }
         }
 
-        let mut checkpoint_stream = self.checkpoint_stream(store.clone(), &READ_SCHEMA, config);
+        let mut checkpoint_stream = self.checkpoint_stream(store.clone(), &READ_SCHEMA, config, false);
         while let Some(batch) = checkpoint_stream.next().await {
             let batch = batch?;
             if maybe_protocol.is_none() {
