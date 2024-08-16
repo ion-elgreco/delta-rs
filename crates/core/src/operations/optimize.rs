@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::SchemaRef as ArrowSchemaRef;
@@ -39,6 +39,7 @@ use parquet::basic::{Compression, ZstdLevel};
 use parquet::errors::ParquetError;
 use parquet::file::properties::WriterProperties;
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
+use tokio::runtime::Runtime;
 use tracing::debug;
 
 use super::transaction::PROTOCOL;
@@ -286,6 +287,11 @@ impl<'a> OptimizeBuilder<'a> {
         self
     }
 }
+/// static write runtime
+fn write_rt() -> &'static Runtime {
+    static WRITE_RT: OnceLock<Runtime> = OnceLock::new();
+    WRITE_RT.get_or_init(|| Runtime::new().expect("Failed to create a tokio runtime for writing."))
+}
 
 impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
     type Output = DeltaResult<(DeltaTable, Metrics)>;
@@ -296,7 +302,6 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
 
         Box::pin(async move {
             PROTOCOL.can_write_to(&this.snapshot.snapshot)?;
-
             let writer_properties = this.writer_properties.unwrap_or_else(|| {
                 WriterProperties::builder()
                     .set_compression(Compression::ZSTD(ZstdLevel::try_new(4).unwrap()))
@@ -657,9 +662,6 @@ impl MergePlan {
         min_commit_interval: Option<Duration>,
         commit_properties: CommitProperties,
     ) -> Result<Metrics, DeltaTableError> {
-        use tokio::runtime::{Runtime};
-        
-        let rewrite_rt = Runtime::new()?;
         let operations = std::mem::take(&mut self.operations);
 
         let stream = match operations {
@@ -690,8 +692,7 @@ impl MergePlan {
                         .try_flatten()
                         .boxed();
 
-
-                    let rewrite_result = rewrite_rt.spawn(Self::rewrite_files(
+                    let rewrite_result = write_rt().spawn(Self::rewrite_files(
                         self.task_parameters.clone(),
                         partition,
                         files,
@@ -724,7 +725,7 @@ impl MergePlan {
                 futures::stream::iter(bins)
                     .map(move |(_, (partition, files))| {
                         let batch_stream = Self::read_zorder(files.clone(), exec_context.clone());
-                        let rewrite_result = rewrite_rt.spawn(Self::rewrite_files(
+                        let rewrite_result = write_rt().spawn(Self::rewrite_files(
                             task_parameters.clone(),
                             partition,
                             files,
