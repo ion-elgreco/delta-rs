@@ -54,6 +54,7 @@ use deltalake::partitions::PartitionFilter;
 use deltalake::protocol::{DeltaOperation, SaveMode};
 use deltalake::DeltaTableBuilder;
 use deltalake::{DeltaOps, DeltaResult};
+use error::DeltaError;
 use futures::future::join_all;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -319,6 +320,10 @@ impl RawDeltaTable {
         &self,
         partition_filters: Option<Vec<(PyBackedStr, PyBackedStr, PartitionFilterValue)>>,
     ) -> PyResult<Vec<String>> {
+        if !self._table.config.require_files {
+            return Err(DeltaError::new_err("Table is initiated without files."))
+        }
+        
         if let Some(filters) = partition_filters {
             let filters = convert_partition_filters(filters).map_err(PythonError::from)?;
             Ok(self
