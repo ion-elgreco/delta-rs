@@ -1768,6 +1768,7 @@ impl From<Column> for DeltaColumn {
 mod tests {
     use arrow_array::StructArray;
     use arrow_schema::Schema;
+    use arrow::datatypes::DataType;
     use chrono::{TimeZone, Utc};
     use datafusion::assert_batches_sorted_eq;
     use datafusion::datasource::physical_plan::ParquetExec;
