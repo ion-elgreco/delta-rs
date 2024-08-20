@@ -30,12 +30,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
+
+use once_cell::sync::Lazy;
+use sysinfo::System;
 
 use async_trait::async_trait;
 use datafusion::datasource::provider_as_source;
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::SessionConfig;
+use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
 use datafusion::execution::session_state::SessionStateBuilder;
 use datafusion::functions_aggregate::expr_fn::{max, min};
 use datafusion::logical_expr::build_join_schema;
@@ -1648,6 +1653,28 @@ fn remove_table_alias(expr: Expr, table_alias: &str) -> Expr {
     .data
 }
 
+/// Taken from Polars-sys utils
+/// Startup system is expensive, so we do it once
+pub struct MemInfo {
+    sys: Mutex<System>,
+}
+
+impl MemInfo {
+    /// This call is quite expensive, cache the results.
+    pub fn free(&self) -> u64 {
+        let mut sys = self.sys.lock().unwrap();
+        sys.refresh_memory();
+        match sys.cgroup_limits() {
+            Some(limits) => limits.free_memory,
+            None => sys.available_memory(),
+        }
+    }
+}
+/// Get Memory
+pub static MEMINFO: Lazy<MemInfo> = Lazy::new(|| MemInfo {
+    sys: Mutex::new(System::new()),
+});
+
 impl std::future::IntoFuture for MergeBuilder {
     type Output = DeltaResult<(DeltaTable, MergeMetrics)>;
     type IntoFuture = BoxFuture<'static, Self::Output>;
@@ -1660,7 +1687,13 @@ impl std::future::IntoFuture for MergeBuilder {
 
             let state = this.state.unwrap_or_else(|| {
                 let config: SessionConfig = DeltaSessionConfig::default().into();
-                let session = SessionContext::new_with_config(config);
+                let runtime = Arc::new(
+                    RuntimeEnv::new(
+                        RuntimeConfig::default().with_memory_limit(MEMINFO.free() as usize, 0.80),
+                    )
+                    .unwrap_or_default(),
+                );
+                let session = SessionContext::new_with_config_rt(config, runtime);
 
                 // If a user provides their own their DF state then they must register the store themselves
                 register_store(this.log_store.clone(), session.runtime_env());
