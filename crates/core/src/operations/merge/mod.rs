@@ -53,8 +53,7 @@ use datafusion_expr::{
     col, conditional_expressions::CaseBuilder, lit, when, Between, Expr, JoinType,
 };
 use datafusion_expr::{
-    Aggregate, BinaryExpr, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
-    UserDefinedLogicalNode, UNNAMED_TABLE,
+    Aggregate, BinaryExpr, Explain, Extension, LogicalPlan, LogicalPlanBuilder, Operator, UserDefinedLogicalNode, UNNAMED_TABLE
 };
 use either::{Left, Right};
 use futures::future::BoxFuture;
@@ -1498,8 +1497,12 @@ async fn execute(
     }
 
     let project = filtered.clone().select(write_projection)?;
-
     let merge_final = &project.into_unoptimized_plan();
+    let new_df = DataFrame::new(state.clone(), merge_final.clone());
+    let explain = new_df.explain(true, true)?;
+    let batches =explain.collect().await?;
+    dbg!(batches);
+
     let write = state.create_physical_plan(merge_final).await?;
 
     let err = || DeltaTableError::Generic("Unable to locate expected metric node".into());
