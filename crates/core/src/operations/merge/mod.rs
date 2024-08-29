@@ -1997,19 +1997,17 @@ mod tests {
         let (table, metrics) = DeltaOps(table)
             .merge(
                 source,
-                col("target.id").eq(col("source.id"))
-                .and(
-                    col("target.id")
-                    .in_list(vec![
-                        col("source.id"),
-                        col("source.modified"),
-                        col("source.value")
-                    ], false)
-                )
-                .and(
-                    col("target.modified")
-                    .in_list(vec![lit("2021-02-02")], false)
-                ),
+                col("target.id")
+                    .eq(col("source.id"))
+                    .and(col("target.id").in_list(
+                        vec![
+                            col("source.id"),
+                            col("source.modified"),
+                            col("source.value"),
+                        ],
+                        false,
+                    ))
+                    .and(col("target.modified").in_list(vec![lit("2021-02-02")], false)),
             )
             .with_source_alias("source")
             .with_target_alias("target")
