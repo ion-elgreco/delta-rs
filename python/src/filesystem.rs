@@ -8,10 +8,35 @@ use pyo3::exceptions::{PyIOError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyBytes, PyType};
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Runtime;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 5 * 1024 * 1024;
+
+#[inline]
+pub fn io_rt() -> &'static Runtime {
+    static IO_TOKIO_RT: OnceLock<Runtime> = OnceLock::new();
+    static PID: OnceLock<u32> = OnceLock::new();
+    match PID.get() {
+        Some(pid) if pid == &std::process::id() => {} // Reuse the static runtime.
+        Some(pid) => {
+            panic!(
+                "Forked process detected - current PID is {} but the tokio runtime was created by {}. The tokio \
+                runtime does not support forked processes https://github.com/tokio-rs/tokio/issues/4301. If you are \
+                seeing this message while using Python multithreading make sure to use the `spawn` or `forkserver` \
+                mode.", 
+                pid, std::process::id()
+            );
+        }
+        None => {
+            PID.set(std::process::id())
+                .expect("Failed to record PID for tokio runtime.");
+        }
+    }
+    IO_TOKIO_RT.get_or_init(|| Runtime::new().expect("Failed to create a IO tokio runtime."))
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FsConfig {
@@ -95,7 +120,7 @@ impl DeltaFileSystemHandler {
     fn copy_file(&self, src: String, dest: String) -> PyResult<()> {
         let from_path = Self::parse_path(&src);
         let to_path = Self::parse_path(&dest);
-        rt().block_on(self.inner.copy(&from_path, &to_path))
+        io_rt().block_on(self.inner.copy(&from_path, &to_path))
             .map_err(PythonError::from)?;
         Ok(())
     }
@@ -107,14 +132,14 @@ impl DeltaFileSystemHandler {
 
     fn delete_dir(&self, path: String) -> PyResult<()> {
         let path = Self::parse_path(&path);
-        rt().block_on(delete_dir(self.inner.as_ref(), &path))
+        io_rt().block_on(delete_dir(self.inner.as_ref(), &path))
             .map_err(PythonError::from)?;
         Ok(())
     }
 
     fn delete_file(&self, path: String) -> PyResult<()> {
         let path = Self::parse_path(&path);
-        rt().block_on(self.inner.delete(&path))
+        io_rt().block_on(self.inner.delete(&path))
             .map_err(PythonError::from)?;
         Ok(())
     }
@@ -143,13 +168,13 @@ impl DeltaFileSystemHandler {
         for file_path in paths {
             let path = Self::parse_path(&file_path);
             let listed = py.allow_threads(|| {
-                rt().block_on(self.inner.list_with_delimiter(Some(&path)))
+                io_rt().block_on(self.inner.list_with_delimiter(Some(&path)))
                     .map_err(PythonError::from)
             })?;
 
             // TODO is there a better way to figure out if we are in a directory?
             if listed.objects.is_empty() && listed.common_prefixes.is_empty() {
-                let maybe_meta = py.allow_threads(|| rt().block_on(self.inner.head(&path)));
+                let maybe_meta = py.allow_threads(|| io_rt().block_on(self.inner.head(&path)));
                 match maybe_meta {
                     Ok(meta) => {
                         let kwargs = HashMap::from([
@@ -210,7 +235,7 @@ impl DeltaFileSystemHandler {
         };
 
         let path = Self::parse_path(&base_dir);
-        let list_result = match rt().block_on(walk_tree(self.inner.clone(), &path, recursive)) {
+        let list_result = match io_rt().block_on(walk_tree(self.inner.clone(), &path, recursive)) {
             Ok(res) => Ok(res),
             Err(ObjectStoreError::NotFound { path, source }) => {
                 if allow_not_found {
@@ -270,7 +295,7 @@ impl DeltaFileSystemHandler {
         let from_path = Self::parse_path(&src);
         let to_path = Self::parse_path(&dest);
         // TODO check the if not exists semantics
-        rt().block_on(self.inner.rename(&from_path, &to_path))
+        io_rt().block_on(self.inner.rename(&from_path, &to_path))
             .map_err(PythonError::from)?;
         Ok(())
     }
@@ -282,7 +307,7 @@ impl DeltaFileSystemHandler {
         };
 
         let path = Self::parse_path(&path);
-        let file = rt()
+        let file = io_rt()
             .block_on(ObjectInputFile::try_new(
                 self.inner.clone(),
                 path,
@@ -320,7 +345,7 @@ impl DeltaFileSystemHandler {
                 Some(2),
             )?;
         }
-        let file = rt()
+        let file = io_rt()
             .block_on(ObjectOutputStream::try_new(
                 self.inner.clone(),
                 path,
@@ -483,7 +508,7 @@ impl ObjectInputFile {
         self.pos += nbytes;
         let data = if nbytes > 0 {
             py.allow_threads(|| {
-                rt().block_on(self.store.get_range(&self.path, range))
+                io_rt().block_on(self.store.get_range(&self.path, range))
                     .map_err(PythonError::from)
             })?
         } else {
@@ -553,14 +578,14 @@ impl ObjectOutputStream {
     }
 
     fn abort(&mut self) -> PyResult<()> {
-        rt().block_on(self.upload.abort())
+        io_rt().block_on(self.upload.abort())
             .map_err(PythonError::from)?;
         Ok(())
     }
 
     fn upload_buffer(&mut self) -> PyResult<()> {
         let payload = std::mem::take(&mut self.buffer).freeze();
-        match rt().block_on(self.upload.put_part(payload)) {
+        match io_rt().block_on(self.upload.put_part(payload)) {
             Ok(_) => Ok(()),
             Err(err) => {
                 self.abort()?;
@@ -578,7 +603,7 @@ impl ObjectOutputStream {
             if !self.buffer.is_empty() {
                 self.upload_buffer()?;
             }
-            match rt().block_on(self.upload.complete()) {
+            match io_rt().block_on(self.upload.complete()) {
                 Ok(_) => Ok(()),
                 Err(err) => Err(PyIOError::new_err(err.to_string())),
             }
