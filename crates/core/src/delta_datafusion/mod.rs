@@ -1767,7 +1767,6 @@ impl From<Column> for DeltaColumn {
 
 #[cfg(test)]
 mod tests {
-    use arrow::datatypes::DataType;
     use arrow_array::StructArray;
     use arrow_schema::Schema;
     use chrono::{TimeZone, Utc};
