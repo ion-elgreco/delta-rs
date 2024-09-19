@@ -78,7 +78,7 @@ use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{
-    Add, DataCheck, EagerSnapshot, Invariant, LogicalFile, Snapshot, StructTypeExt,
+    Add, DataCheck, EagerSnapshot, Invariant, Snapshot, StructTypeExt,
 };
 use crate::logstore::LogStoreRef;
 use crate::table::builder::ensure_table_uri;
