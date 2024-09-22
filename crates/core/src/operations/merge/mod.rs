@@ -1176,10 +1176,12 @@ async fn execute(
     }
 
     let project = filtered.clone().select(write_projection)?;
+    dbg!("imhere first");
+    dbg!(&project.clone().explain(true, true)?.collect().await?);
 
-    let merge_final = &project.into_unoptimized_plan();
-    let write = state.create_physical_plan(merge_final).await?;
-
+    dbg!("imhere");
+    let write = project.create_physical_plan().await?;
+    dbg!("imhere2");
     let err = || DeltaTableError::Generic("Unable to locate expected metric node".into());
     let source_count = find_metric_node(SOURCE_COUNT_ID, &write).ok_or_else(err)?;
     let op_count = find_metric_node(OUTPUT_COUNT_ID, &write).ok_or_else(err)?;
