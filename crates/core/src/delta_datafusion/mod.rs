@@ -21,6 +21,7 @@
 //! ```
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::sync::Arc;
@@ -76,9 +77,7 @@ use url::Url;
 use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::schema_adapter::DeltaSchemaAdapterFactory;
 use crate::errors::{DeltaResult, DeltaTableError};
-use crate::kernel::{
-    Add, DataCheck, EagerSnapshot, Invariant, LogicalFile, Snapshot, StructTypeExt,
-};
+use crate::kernel::{Add, DataCheck, EagerSnapshot, Invariant, Snapshot, StructTypeExt};
 use crate::logstore::LogStoreRef;
 use crate::table::builder::ensure_table_uri;
 use crate::table::state::DeltaTableState;
@@ -581,6 +580,8 @@ impl<'a> DeltaScanBuilder<'a> {
             }
         };
 
+        dbg!((&files, &files_scanned, &files_pruned));
+
         // TODO we group files together by their partition values. If the table is partitioned
         // and partitions are somewhat evenly distributed, probably not the worst choice ...
         // However we may want to do some additional balancing in case we are far off from the above.
@@ -673,13 +674,15 @@ impl<'a> DeltaScanBuilder<'a> {
             .global_counter("files_pruned")
             .add(files_pruned);
 
-        Ok(DeltaScan {
+        let scan = DeltaScan {
             table_uri: ensure_table_uri(self.log_store.root_uri())?.as_str().into(),
             parquet_scan: exec_plan_builder.build_arc(),
             config,
             logical_schema,
             metrics,
-        })
+        };
+        dbg!(&scan.properties().equivalence_properties());
+        Ok(scan)
     }
 }
 
