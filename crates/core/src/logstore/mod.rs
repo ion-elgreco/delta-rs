@@ -1,4 +1,5 @@
 //! Delta log store.
+use std::any::Any;
 use std::cmp::min;
 use std::io::{BufRead, BufReader, Cursor};
 use std::sync::OnceLock;
@@ -192,7 +193,7 @@ pub struct LogStoreConfig {
 ///   `get_latest_version` must return a version >= `v`, i.e. the underlying file system entry must
 ///   become visible immediately.
 #[async_trait::async_trait]
-pub trait LogStore: Sync + Send {
+pub trait LogStore: Sync + Send + Any {
     /// Return the name of this LogStore implementation
     fn name(&self) -> String;
 
