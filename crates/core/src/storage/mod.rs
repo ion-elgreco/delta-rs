@@ -373,6 +373,89 @@ impl ObjectStoreFactory for DefaultObjectStoreFactory {
     }
 }
 
+pub trait ObjectStoreRegistry: Send + Sync + std::fmt::Debug + 'static + Clone {
+    /// If a store with the same key existed before, it is replaced and returned
+    fn register_store(
+        &self,
+        url: &Url,
+        store: Arc<dyn ObjectStore>,
+    ) -> Option<Arc<dyn ObjectStore>>;
+
+    /// Get a suitable store for the provided URL. For example:
+    /// If no [`ObjectStore`] found for the `url`, ad-hoc discovery may be executed depending on
+    /// the `url` and [`ObjectStoreRegistry`] implementation. An [`ObjectStore`] may be lazily
+    /// created and registered.
+    fn get_store(&self, url: &Url) -> DeltaResult<Arc<dyn ObjectStore>>;
+}
+
+/// The default [`ObjectStoreRegistry`]
+#[derive(Clone)]
+pub struct DefaultObjectStoreRegistry {
+    /// A map from scheme to object store that serve list / read operations for the store
+    object_stores: DashMap<String, Arc<dyn ObjectStore>>,
+}
+
+impl Default for DefaultObjectStoreRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DefaultObjectStoreRegistry {
+    pub fn new() -> Self {
+        let object_stores: DashMap<String, Arc<dyn ObjectStore>> = DashMap::new();
+        Self { object_stores }
+    }
+}
+
+impl std::fmt::Debug for DefaultObjectStoreRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("DefaultObjectStoreRegistry")
+            .field(
+                "schemes",
+                &self
+                    .object_stores
+                    .iter()
+                    .map(|o| o.key().clone())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl ObjectStoreRegistry for DefaultObjectStoreRegistry {
+    fn register_store(
+        &self,
+        url: &Url,
+        store: Arc<dyn ObjectStore>,
+    ) -> Option<Arc<dyn ObjectStore>> {
+        let s = get_url_key(url);
+        self.object_stores.insert(s, store)
+    }
+
+    fn get_store(&self, url: &Url) -> DeltaResult<Arc<dyn ObjectStore>> {
+        let s = get_url_key(url);
+        self.object_stores
+            .get(&s)
+            .map(|o| Arc::clone(o.value()))
+            .ok_or_else(|| {
+                DeltaTableError::generic(format!(
+                    "No suitable object store found for {url}. See `RuntimeEnv::register_object_store`"
+                ))
+            })
+    }
+}
+
+/// Get the key of a url for object store registration.
+/// The credential info will be removed
+fn get_url_key(url: &Url) -> String {
+    format!(
+        "{}://{}",
+        url.scheme(),
+        &url[url::Position::BeforeHost..url::Position::AfterPort],
+    )
+}
+
 /// TODO
 pub type FactoryRegistry = Arc<DashMap<Url, Arc<dyn ObjectStoreFactory>>>;
 

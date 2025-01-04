@@ -8,6 +8,7 @@ use crate::storage::S3StorageOptions;
 use crate::{constants, CommitEntry, DynamoDbLockClient, UpdateLogEntryResult};
 
 use bytes::Bytes;
+use deltalake_core::storage::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use deltalake_core::{ObjectStoreError, Path};
 use tracing::{debug, error, warn};
 use url::Url;
@@ -24,7 +25,7 @@ const MAX_REPAIR_RETRIES: i64 = 3;
 
 /// [`LogStore`] implementation backed by DynamoDb
 pub struct S3DynamoDbLogStore {
-    pub(crate) storage: ObjectStoreRef,
+    pub(crate) storage: DefaultObjectStoreRegistry,
     lock_client: DynamoDbLockClient,
     config: LogStoreConfig,
     table_path: String,
@@ -71,8 +72,10 @@ impl S3DynamoDbLogStore {
             },
         })?;
         let table_path = to_uri(&location, &Path::from(""));
+        let registry = DefaultObjectStoreRegistry::new();
+        registry.register_store(&location, object_store);
         Ok(Self {
-            storage: object_store,
+            storage: registry,
             lock_client,
             config: LogStoreConfig {
                 location,
@@ -93,7 +96,13 @@ impl S3DynamoDbLogStore {
             return Ok(RepairLogEntryResult::AlreadyCompleted);
         }
         for retry in 0..=MAX_REPAIR_RETRIES {
-            match write_commit_entry(&self.storage, entry.version, &entry.temp_path).await {
+            match write_commit_entry(
+                self.object_store().as_ref(),
+                entry.version,
+                &entry.temp_path,
+            )
+            .await
+            {
                 Ok(()) => {
                     debug!("Successfully committed entry for version {}", entry.version);
                     return self.try_complete_entry(entry, true).await;
@@ -166,6 +175,10 @@ impl LogStore for S3DynamoDbLogStore {
         "S3DynamoDbLogStore".into()
     }
 
+    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
+        self.storage.register_store(url, store);
+    }
+
     fn root_uri(&self) -> String {
         self.table_path.clone()
     }
@@ -192,7 +205,7 @@ impl LogStore for S3DynamoDbLogStore {
         if let Ok(Some(entry)) = entry {
             self.repair_entry(&entry).await?;
         }
-        read_commit_entry(&self.storage, version).await
+        read_commit_entry(self.object_store().as_ref(), version).await
     }
 
     /// Tries to commit a prepared commit file. Returns [DeltaTableError::VersionAlreadyExists]
@@ -278,7 +291,7 @@ impl LogStore for S3DynamoDbLogStore {
                 },
             })?;
 
-        abort_commit_entry(&self.storage, version, &tmp_commit).await?;
+        abort_commit_entry(self.object_store().as_ref(), version, &tmp_commit).await?;
         Ok(())
     }
 
@@ -305,7 +318,7 @@ impl LogStore for S3DynamoDbLogStore {
     }
 
     fn object_store(&self) -> ObjectStoreRef {
-        self.storage.clone()
+        self.storage.get_store(&self.config.location).unwrap()
     }
 
     fn config(&self) -> &LogStoreConfig {

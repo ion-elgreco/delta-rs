@@ -4,7 +4,9 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use deltalake_core::logstore::*;
-use deltalake_core::storage::commit_uri_from_version;
+use deltalake_core::storage::{
+    commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
+};
 use deltalake_core::{
     operations::transaction::TransactionError,
     storage::{ObjectStoreRef, StorageOptions},
@@ -39,7 +41,7 @@ pub fn lakefs_logstore(
 /// Default [`LogStore`] implementation
 #[derive(Debug, Clone)]
 pub struct LakeFSLogStore {
-    pub(crate) storage: Arc<dyn ObjectStore>,
+    pub(crate) storage: DefaultObjectStoreRegistry,
     config: LogStoreConfig,
     // client: LakeFSClient,
 }
@@ -56,10 +58,11 @@ impl LakeFSLogStore {
         config: LogStoreConfig,
         // client: LakeFSClient
     ) -> Self {
+        let registry = DefaultObjectStoreRegistry::new();
+        registry.register_store(&config.location, storage);
         Self {
-            storage,
+            storage: registry,
             config,
-            //  client
         }
     }
 }
@@ -70,8 +73,12 @@ impl LogStore for LakeFSLogStore {
         "LakeFSLogStore".into()
     }
 
+    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
+        self.storage.register_store(url, store);
+    }
+
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {
-        read_commit_entry(self.storage.as_ref(), version).await
+        read_commit_entry(&self.storage.get_store(&self.config.location)?, version).await
     }
 
     /// Tries to commit a prepared commit file. Returns [`TransactionError`]
@@ -126,7 +133,9 @@ impl LogStore for LakeFSLogStore {
     }
 
     fn object_store(&self) -> Arc<dyn ObjectStore> {
-        self.storage.clone()
+        self.storage
+            .get_store(&Url::parse("transaction").unwrap())
+            .expect("LakeFS Operation middleware not executed. Transaction store is missing.")
     }
 
     fn config(&self) -> &LogStoreConfig {

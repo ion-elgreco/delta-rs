@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use deltalake_core::logstore::*;
+use deltalake_core::storage::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use deltalake_core::{
     operations::transaction::TransactionError,
     storage::{ObjectStoreRef, StorageOptions},
@@ -30,7 +31,7 @@ pub fn default_s3_logstore(
 /// Default [`LogStore`] implementation
 #[derive(Debug, Clone)]
 pub struct S3LogStore {
-    pub(crate) storage: Arc<dyn ObjectStore>,
+    pub(crate) storage: DefaultObjectStoreRegistry,
     config: LogStoreConfig,
 }
 
@@ -42,7 +43,12 @@ impl S3LogStore {
     /// * `storage` - A shared reference to an [`object_store::ObjectStore`] with "/" pointing at delta table root (i.e. where `_delta_log` is located).
     /// * `location` - A url corresponding to the storage location of `storage`.
     pub fn new(storage: ObjectStoreRef, config: LogStoreConfig) -> Self {
-        Self { storage, config }
+        let registry = DefaultObjectStoreRegistry::new();
+        registry.register_store(&config.location, storage);
+        Self {
+            storage: registry,
+            config,
+        }
     }
 }
 
@@ -52,8 +58,12 @@ impl LogStore for S3LogStore {
         "S3LogStore".into()
     }
 
+    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
+        self.storage.register_store(url, store);
+    }
+
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {
-        read_commit_entry(self.storage.as_ref(), version).await
+        read_commit_entry(self.object_store().as_ref(), version).await
     }
 
     /// Tries to commit a prepared commit file. Returns [`TransactionError`]
@@ -68,7 +78,7 @@ impl LogStore for S3LogStore {
     ) -> Result<(), TransactionError> {
         match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
-                Ok(write_commit_entry(&self.object_store(), version, &tmp_commit).await?)
+                Ok(write_commit_entry(self.object_store().as_ref(), version, &tmp_commit).await?)
             }
             _ => unreachable!(), // S3 Log Store should never receive bytes
         }
@@ -90,7 +100,7 @@ impl LogStore for S3LogStore {
     ) -> Result<(), TransactionError> {
         match &commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
-                abort_commit_entry(self.storage.as_ref(), version, tmp_commit).await
+                abort_commit_entry(self.object_store().as_ref(), version, tmp_commit).await
             }
             _ => unreachable!(), // S3 Log Store should never receive bytes
         }
@@ -105,7 +115,7 @@ impl LogStore for S3LogStore {
     }
 
     fn object_store(&self) -> Arc<dyn ObjectStore> {
-        self.storage.clone()
+        self.storage.get_store(&self.config.location).unwrap()
     }
 
     fn config(&self) -> &LogStoreConfig {
