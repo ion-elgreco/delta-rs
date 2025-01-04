@@ -5,7 +5,6 @@ use deltalake_core::storage::{
     limit_store_handler, ObjectStoreFactory, ObjectStoreRef, StorageOptions,
 };
 use deltalake_core::{DeltaResult, DeltaTableError, Path};
-use object_store::ObjectStoreScheme;
 use std::fmt::Debug;
 use std::str::FromStr;
 use tracing::log::*;
@@ -66,8 +65,12 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
     ) -> DeltaResult<(ObjectStoreRef, Path)> {
         let options = self.with_env_s3(storage_options);
 
+        // Convert LakeFS URI to equivalent S3 URI.
+        let s3_url = Url::parse(&format!("s3://{}", url.path()))
+            .map_err(|_| DeltaTableError::InvalidTableLocation(url.clone().into()))?;
+
         // All S3-likes should start their builder the same way
-        let mut builder = AmazonS3Builder::new().with_url(url.to_string());
+        let mut builder = AmazonS3Builder::new().with_url(s3_url.to_string());
 
         for (key, value) in options.0.iter() {
             if let Ok(key) = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase()) {
@@ -75,18 +78,12 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
             }
         }
 
-        let (_scheme, path) =
-            ObjectStoreScheme::parse(url).map_err(|e| DeltaTableError::GenericError {
-                source: Box::new(e),
-            })?;
-        let prefix = Path::parse(path)?;
-
         let inner = builder.build()?;
 
         let store = limit_store_handler(inner, &options);
         debug!("Initialized the object store: {store:?}");
 
-        Ok((store, prefix))
+        Ok((store, s3_url.path().into()))
     }
 }
 
