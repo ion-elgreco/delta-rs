@@ -118,6 +118,10 @@ impl LogStore for DefaultLogStore {
         self.storage.get_store(&self.config.location).unwrap()
     }
 
+    fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
+        self.object_store()
+    }
+
     fn config(&self) -> &LogStoreConfig {
         &self.config
     }

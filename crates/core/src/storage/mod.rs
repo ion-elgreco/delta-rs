@@ -386,6 +386,8 @@ pub trait ObjectStoreRegistry: Send + Sync + std::fmt::Debug + 'static + Clone {
     /// the `url` and [`ObjectStoreRegistry`] implementation. An [`ObjectStore`] may be lazily
     /// created and registered.
     fn get_store(&self, url: &Url) -> DeltaResult<Arc<dyn ObjectStore>>;
+
+    fn all_stores(&self) -> &DashMap<String, Arc<dyn ObjectStore>>;
 }
 
 /// The default [`ObjectStoreRegistry`]
@@ -429,14 +431,12 @@ impl ObjectStoreRegistry for DefaultObjectStoreRegistry {
         url: &Url,
         store: Arc<dyn ObjectStore>,
     ) -> Option<Arc<dyn ObjectStore>> {
-        let s = get_url_key(url);
-        self.object_stores.insert(s, store)
+        self.object_stores.insert(url.to_string(), store)
     }
 
     fn get_store(&self, url: &Url) -> DeltaResult<Arc<dyn ObjectStore>> {
-        let s = get_url_key(url);
         self.object_stores
-            .get(&s)
+            .get(&url.to_string())
             .map(|o| Arc::clone(o.value()))
             .ok_or_else(|| {
                 DeltaTableError::generic(format!(
@@ -444,17 +444,12 @@ impl ObjectStoreRegistry for DefaultObjectStoreRegistry {
                 ))
             })
     }
+
+    fn all_stores(&self) -> &DashMap<String, Arc<dyn ObjectStore>> {
+        &self.object_stores
+    }
 }
 
-/// Get the key of a url for object store registration.
-/// The credential info will be removed
-fn get_url_key(url: &Url) -> String {
-    format!(
-        "{}://{}",
-        url.scheme(),
-        &url[url::Position::BeforeHost..url::Position::AfterPort],
-    )
-}
 
 /// TODO
 pub type FactoryRegistry = Arc<DashMap<Url, Arc<dyn ObjectStoreFactory>>>;

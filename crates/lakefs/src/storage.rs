@@ -1,10 +1,12 @@
 //! LakFS storage backend (internally S3).
 
-use deltalake_core::storage::object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
+use deltalake_core::storage::object_store::aws::AmazonS3ConfigKey;
 use deltalake_core::storage::{
     limit_store_handler, ObjectStoreFactory, ObjectStoreRef, StorageOptions,
 };
 use deltalake_core::{DeltaResult, DeltaTableError, Path};
+use object_store::parse_url_opts;
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::str::FromStr;
 use tracing::log::*;
@@ -68,24 +70,28 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
         let options = self.with_env_s3(storage_options);
 
         // Convert LakeFS URI to equivalent S3 URI.
-        let s3_url = Url::parse(&format!("s3://{}", url.path()))
+        let s3_url = url.to_string().replace("lakefs://", "s3://");
+
+        let s3_url = Url::parse(&s3_url)
             .map_err(|_| DeltaTableError::InvalidTableLocation(url.clone().into()))?;
 
         // All S3-likes should start their builder the same way
-        let mut builder = AmazonS3Builder::new().with_url(s3_url.to_string());
-
-        for (key, value) in options.0.iter() {
-            if let Ok(key) = AmazonS3ConfigKey::from_str(&key.to_ascii_lowercase()) {
-                builder = builder.with_config(key, value.clone());
-            }
-        }
-
-        let inner = builder.build()?;
-
+        let config = options
+            .clone()
+            .0
+            .into_iter()
+            .filter_map(|(k, v)| {
+                if let Ok(key) = AmazonS3ConfigKey::from_str(&k.to_ascii_lowercase()) {
+                    Some((key, v))
+                } else {
+                    None
+                }
+            })
+            .collect::<HashMap<AmazonS3ConfigKey, String>>();
+        let (inner, prefix) = parse_url_opts(&s3_url, config)?;
         let store = limit_store_handler(inner, &options);
         debug!("Initialized the object store: {store:?}");
-
-        Ok((store, s3_url.path().into()))
+        Ok((store, prefix))
     }
 }
 

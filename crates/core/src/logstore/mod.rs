@@ -193,7 +193,7 @@ pub struct LogStoreConfig {
 ///   `get_latest_version` must return a version >= `v`, i.e. the underlying file system entry must
 ///   become visible immediately.
 #[async_trait::async_trait]
-pub trait LogStore: AsAny {
+pub trait LogStore: Send + Sync + AsAny {
     /// Return the name of this LogStore implementation
     fn name(&self) -> String;
 
@@ -261,8 +261,11 @@ pub trait LogStore: AsAny {
         Ok(PeekCommit::New(next_version, actions.unwrap()))
     }
 
-    /// Get underlying object store.
+    /// Get writing object store.
     fn object_store(&self) -> Arc<dyn ObjectStore>;
+
+    /// Get reading object store
+    fn reading_object_store(&self) -> Arc<dyn ObjectStore>;
 
     /// [Path] to Delta log
     fn to_uri(&self, location: &Path) -> String {

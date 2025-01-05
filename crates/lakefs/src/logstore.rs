@@ -150,10 +150,25 @@ impl LogStore for LakeFSLogStore {
         get_earliest_version(self, current_version).await
     }
 
+    fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
+        self.storage.get_store(&self.config.location).unwrap()
+    }
+
     fn object_store(&self) -> Arc<dyn ObjectStore> {
-        self.storage
-            .get_store(&Url::parse("transaction").unwrap())
-            .expect("LakeFS Operation middleware not executed. Transaction store is missing.")
+        let stores = self.storage.all_stores();
+        
+        // Think of clever way to handle this, also what happens when multithread apps share the same logstore
+        // where never transactions keep getting inserted???
+        if stores.len() != 2 {
+            panic!("the object_store registry inside logstore should not contain more than two stores.")
+        }
+        
+        for item in stores {
+            if item.key() != self.config().location.as_str() {
+                return item.value().clone()
+            }
+        }
+        unreachable!()
     }
 
     fn config(&self) -> &LogStoreConfig {
