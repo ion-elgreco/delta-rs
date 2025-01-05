@@ -239,10 +239,7 @@ impl LakeFSClient {
                 ))),
             })?;
 
-        // Handle the response
-
-        dbg!(response.status());
-
+        // Handle the response;
         match response.status() {
             StatusCode::OK => return Ok(()),
             StatusCode::CONFLICT => {

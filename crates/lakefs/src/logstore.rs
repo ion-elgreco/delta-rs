@@ -1,6 +1,5 @@
 //! Default implementation of [`LakeFSLogStore`] for LakeFS
 
-use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
 use crate::client::LakeFSConfig;
@@ -8,7 +7,6 @@ use crate::client::LakeFSConfig;
 use super::client::LakeFSClient;
 use async_trait::async_trait;
 use bytes::Bytes;
-use delta_kernel::AsAny;
 use deltalake_core::operations::PreExecuteHandler;
 use deltalake_core::storage::url_prefix_handler;
 use deltalake_core::storage::{

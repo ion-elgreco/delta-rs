@@ -33,7 +33,6 @@ use deltalake::kernel::{
 };
 use deltalake::operations::add_column::AddColumnBuilder;
 use deltalake::operations::add_feature::AddTableFeatureBuilder;
-use deltalake::operations::collect_sendable_stream;
 use deltalake::operations::constraints::ConstraintBuilder;
 use deltalake::operations::convert_to_delta::{ConvertToDeltaBuilder, PartitionStrategy};
 use deltalake::operations::delete::DeleteBuilder;
@@ -48,6 +47,7 @@ use deltalake::operations::transaction::{
 };
 use deltalake::operations::update::UpdateBuilder;
 use deltalake::operations::vacuum::VacuumBuilder;
+use deltalake::operations::{collect_sendable_stream, PreExecuteHandler};
 use deltalake::parquet::basic::Compression;
 use deltalake::parquet::errors::ParquetError;
 use deltalake::parquet::file::properties::WriterProperties;
@@ -378,6 +378,11 @@ impl RawDeltaTable {
             {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
+
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -424,6 +429,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -478,6 +487,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             let converted_filters =
                 convert_partition_filters(partition_filters.unwrap_or_default())
                     .map_err(PythonError::from)?;
@@ -540,6 +553,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             let converted_filters =
                 convert_partition_filters(partition_filters.unwrap_or_default())
                     .map_err(PythonError::from)?;
@@ -577,6 +594,11 @@ impl RawDeltaTable {
             {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
+
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -605,6 +627,11 @@ impl RawDeltaTable {
             {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
+
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -635,6 +662,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -664,6 +695,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+    
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -767,6 +802,13 @@ impl RawDeltaTable {
         commit_properties: Option<PyCommitProperties>,
     ) -> PyResult<PyMergeBuilder> {
         py.allow_threads(|| {
+            let handler: Option<Arc<dyn PreExecuteHandler>> =
+                if self._config.root_url.starts_with("lakefs://") {
+                    Some(Arc::new(LakeFSPreExecuteHandler {}))
+                } else {
+                    None
+                };
+
             Ok(PyMergeBuilder::new(
                 self._table.log_store(),
                 self._table.snapshot().map_err(PythonError::from)?.clone(),
@@ -778,6 +820,7 @@ impl RawDeltaTable {
                 writer_properties,
                 post_commithook_properties,
                 commit_properties,
+                handler,
             )
             .map_err(PythonError::from)?)
         })
@@ -829,6 +872,10 @@ impl RawDeltaTable {
 
         if let Some(commit_properties) = maybe_create_commit_properties(commit_properties, None) {
             cmd = cmd.with_commit_properties(commit_properties);
+        }
+
+        if self._config.root_url.starts_with("lakefs://") {
+            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
         }
 
         let (table, metrics) = rt()
@@ -1192,6 +1239,10 @@ impl RawDeltaTable {
                 cmd = cmd.with_commit_properties(commit_properties);
             }
 
+            if self._config.root_url.starts_with("lakefs://") {
+                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            }
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -1214,6 +1265,10 @@ impl RawDeltaTable {
 
         if let Some(commit_properties) = maybe_create_commit_properties(commit_properties, None) {
             cmd = cmd.with_commit_properties(commit_properties);
+        }
+
+        if self._config.root_url.starts_with("lakefs://") {
+            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
         }
 
         let table = rt()
@@ -1242,6 +1297,10 @@ impl RawDeltaTable {
             maybe_create_commit_properties(commit_properties, post_commithook_properties)
         {
             cmd = cmd.with_commit_properties(commit_properties);
+        }
+
+        if self._config.root_url.starts_with("lakefs://") {
+            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
         }
 
         let (table, metrics) = rt()
@@ -1835,6 +1894,10 @@ fn write_to_deltalake(
             builder = builder.with_commit_properties(commit_properties);
         };
 
+        if table_uri.starts_with("lakefs://") {
+            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+        }
+
         rt().block_on(builder.into_future())
             .map_err(PythonError::from)?;
 
@@ -1920,7 +1983,7 @@ fn write_new_deltalake(
     custom_metadata: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
-        let table = DeltaTableBuilder::from_uri(table_uri)
+        let table = DeltaTableBuilder::from_uri(table_uri.clone())
             .with_storage_options(storage_options.unwrap_or_default())
             .build()
             .map_err(PythonError::from)?;
@@ -1951,6 +2014,10 @@ fn write_new_deltalake(
             builder = builder.with_metadata(json_metadata);
         };
 
+        if table_uri.starts_with("lakefs://") {
+            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+        }
+
         rt().block_on(builder.into_future())
             .map_err(PythonError::from)?;
 
@@ -1973,7 +2040,7 @@ fn convert_to_deltalake(
     custom_metadata: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
-        let mut builder = ConvertToDeltaBuilder::new().with_location(uri);
+        let mut builder = ConvertToDeltaBuilder::new().with_location(uri.clone());
 
         if let Some(part_schema) = partition_schema {
             let schema: StructType = (&part_schema.0).try_into().map_err(PythonError::from)?;
@@ -2007,6 +2074,10 @@ fn convert_to_deltalake(
                 metadata.into_iter().map(|(k, v)| (k, v.into())).collect();
             builder = builder.with_metadata(json_metadata);
         };
+
+        if uri.starts_with("lakefs://") {
+            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+        }
 
         rt().block_on(builder.into_future())
             .map_err(PythonError::from)?;

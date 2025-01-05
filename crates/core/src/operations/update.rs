@@ -190,6 +190,12 @@ impl UpdateBuilder {
         self.safe_cast = safe_cast;
         self
     }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
