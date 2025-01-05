@@ -450,7 +450,6 @@ impl ObjectStoreRegistry for DefaultObjectStoreRegistry {
     }
 }
 
-
 /// TODO
 pub type FactoryRegistry = Arc<DashMap<Url, Arc<dyn ObjectStoreFactory>>>;
 

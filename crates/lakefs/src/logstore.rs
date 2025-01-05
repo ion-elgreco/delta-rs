@@ -156,16 +156,16 @@ impl LogStore for LakeFSLogStore {
 
     fn object_store(&self) -> Arc<dyn ObjectStore> {
         let stores = self.storage.all_stores();
-        
+
         // Think of clever way to handle this, also what happens when multithread apps share the same logstore
         // where never transactions keep getting inserted???
         if stores.len() != 2 {
             panic!("the object_store registry inside logstore should not contain more than two stores.")
         }
-        
+
         for item in stores {
             if item.key() != self.config().location.as_str() {
-                return item.value().clone()
+                return item.value().clone();
             }
         }
         unreachable!()
@@ -190,16 +190,17 @@ pub struct LakeFSPreExecuteHandler {}
 #[async_trait]
 impl PreExecuteHandler for LakeFSPreExecuteHandler {
     async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
-        if let Some(lakefs_store) = log_store
-            .clone()
-            .as_any()
-            .downcast_ref::<Arc<LakeFSLogStore>>()
-        {
+        if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
             let lakefs_url = lakefs_store
                 .client
                 .create_txn_branch(&lakefs_store.config.location)
                 .await?;
-            let txn_store = lakefs_store.build_new_store(&lakefs_url)?;
+            // IMPORTANT: OBJECTSTORE NEEDS TOB BE WRAPPED IN URL PREFIX HANDLER, DON'T BE LIKE ME ^^
+            let txn_store = url_prefix_handler(
+                lakefs_store.build_new_store(&lakefs_url)?,
+                Path::parse(lakefs_url.path())?,
+            );
+
             lakefs_store.register_object_store(&lakefs_url, txn_store);
             Ok(())
         } else {

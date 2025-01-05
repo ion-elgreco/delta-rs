@@ -286,7 +286,7 @@ pub trait LogStore: Send + Sync + AsAny {
     /// Check if the location is a delta table location
     async fn is_delta_table_location(&self) -> DeltaResult<bool> {
         // TODO We should really be using HEAD here, but this fails in windows tests
-        let object_store = self.object_store();
+        let object_store = self.reading_object_store();
         let mut stream = object_store.list(Some(self.log_path()));
         if let Some(res) = stream.next().await {
             match res {

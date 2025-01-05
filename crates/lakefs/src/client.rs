@@ -44,14 +44,14 @@ impl LakeFSClient {
     pub async fn create_txn_branch(&self, source_url: &Url) -> DeltaResult<Url> {
         let (repo, source_branch, table) = self.decompose_url(source_url);
 
-        let request_url = format!("{}/repositories/{}/branches", self.config.host, repo);
+        let request_url = format!("{}/api/v1/repositories/{}/branches", self.config.host, repo);
 
         let transaction_branch = format!("tx-{}", Uuid::new_v4());
         let body = json!({
             "name": transaction_branch,
             "source": source_branch,
             "force": false,
-            "hidden": true,
+            "hidden": false, // Set to true later
         });
 
         let response = self
@@ -102,7 +102,7 @@ impl LakeFSClient {
         let (repo, branch, table) = self.decompose_url(url);
 
         let request_url = format!(
-            "{}/repositories/{}/branches/{}/commits",
+            "{}/api/v1/repositories/{}/branches/{}/commits",
             self.config.host, repo, branch
         );
 
@@ -121,7 +121,7 @@ impl LakeFSClient {
 
         // Handle the response
         match response.status() {
-            StatusCode::CREATED => return Ok(()),
+            StatusCode::NO_CONTENT => return Ok(()),
             StatusCode::UNAUTHORIZED => {
                 return Err(DeltaTableError::generic(
                     "Unauthorized request, please check credentials/access.",
@@ -149,11 +149,11 @@ impl LakeFSClient {
         target_url: &Url,
         commit_version: i64,
     ) -> Result<(), TransactionError> {
-        let (repo, source_branch, _) = self.decompose_url(source_url);
+        let (_repo, source_branch, _) = self.decompose_url(source_url);
         let (repo, target_branch, table) = self.decompose_url(target_url);
 
         let request_url = format!(
-            "{}//repositories/{}/refs/{}/merge/{}",
+            "{}/api/v1/repositories/{}/refs/{}/merge/{}",
             self.config.host, repo, source_branch, target_branch
         );
 
@@ -178,7 +178,7 @@ impl LakeFSClient {
 
         // Handle the response
         match response.status() {
-            StatusCode::CREATED => return Ok(()),
+            StatusCode::OK => return Ok(()),
             StatusCode::CONFLICT => {
                 return Err(TransactionError::VersionAlreadyExists(commit_version))
             }
@@ -210,7 +210,12 @@ impl LakeFSClient {
     }
 
     fn decompose_url(&self, url: &Url) -> (String, String, String) {
-        let url_path = url.path().split("/").collect::<Vec<&str>>();
+        let url_string = url.to_string();
+        let url_path = url_string
+            .strip_prefix("lakefs://")
+            .unwrap()
+            .split("/")
+            .collect::<Vec<&str>>();
         let repo = url_path[0].to_owned();
         let branch = url_path[1].to_owned();
         let table = url_path[2..].join("/");
