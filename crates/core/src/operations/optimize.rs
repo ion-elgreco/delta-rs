@@ -43,6 +43,7 @@ use tracing::*;
 
 use super::transaction::PROTOCOL;
 use super::writer::{PartitionWriter, PartitionWriterConfig};
+use super::{Operation, PreExecuteHandler};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{scalars::ScalarExt, Action, PartitionsExt, Remove};
 use crate::logstore::LogStoreRef;
@@ -188,7 +189,6 @@ pub enum OptimizeType {
 ///
 /// If a target file size is not provided then `delta.targetFileSize` from the
 /// table's configuration is read. Otherwise a default value is used.
-#[derive(Debug)]
 pub struct OptimizeBuilder<'a> {
     /// A snapshot of the to-be-optimized table's state
     snapshot: DeltaTableState,
@@ -211,9 +211,17 @@ pub struct OptimizeBuilder<'a> {
     /// Optimize type
     optimize_type: OptimizeType,
     min_commit_interval: Option<Duration>,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for OptimizeBuilder<'_> {}
+impl super::Operation<()> for OptimizeBuilder<'_> {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl<'a> OptimizeBuilder<'a> {
     /// Create a new [`OptimizeBuilder`]
@@ -230,6 +238,7 @@ impl<'a> OptimizeBuilder<'a> {
             max_spill_size: 20 * 1024 * 1024 * 1024, // 20 GB.
             optimize_type: OptimizeType::Compact,
             min_commit_interval: None,
+            pre_execute_handler: None,
         }
     }
 
@@ -286,6 +295,12 @@ impl<'a> OptimizeBuilder<'a> {
         self.min_commit_interval = Some(min_commit_interval);
         self
     }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
 }
 
 impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
@@ -300,6 +315,7 @@ impl<'a> std::future::IntoFuture for OptimizeBuilder<'a> {
             if !&this.snapshot.load_config().require_files {
                 return Err(DeltaTableError::NotInitializedWithFiles("OPTIMIZE".into()));
             }
+            this.pre_execute().await?;
 
             let writer_properties = this.writer_properties.unwrap_or_else(|| {
                 WriterProperties::builder()

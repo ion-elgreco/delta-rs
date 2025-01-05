@@ -53,7 +53,7 @@ use super::cdc::should_write_cdc;
 use super::datafusion_utils::Expression;
 use super::transaction::{CommitBuilder, CommitProperties, TableReference, PROTOCOL};
 use super::writer::{DeltaWriter, WriterConfig};
-use super::CreateBuilder;
+use super::{CreateBuilder, Operation, PreExecuteHandler};
 use crate::delta_datafusion::expr::fmt_expr_to_sql;
 use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::{
@@ -163,6 +163,7 @@ pub struct WriteBuilder {
     description: Option<String>,
     /// Configurations of the delta table, only used when table doesn't exist
     configuration: HashMap<String, Option<String>>,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -180,7 +181,14 @@ pub struct WriteMetrics {
     pub execution_time_ms: u64,
 }
 
-impl super::Operation<()> for WriteBuilder {}
+impl super::Operation<()> for WriteBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl WriteBuilder {
     /// Create a new [`WriteBuilder`]
@@ -203,6 +211,7 @@ impl WriteBuilder {
             name: None,
             description: None,
             configuration: Default::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -296,6 +305,12 @@ impl WriteBuilder {
         self
     }
 
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
+
     /// Set configuration on created table
     pub fn with_configuration(
         mut self,
@@ -376,7 +391,7 @@ impl WriteBuilder {
                     builder = builder.with_comment(desc.clone());
                 };
 
-                let (_, actions, _) = builder.into_table_and_actions()?;
+                let (_, actions, _) = builder.into_table_and_actions().await?;
                 Ok(actions)
             }
         }
@@ -798,6 +813,9 @@ impl std::future::IntoFuture for WriteBuilder {
         let this = self;
 
         Box::pin(async move {
+            // Runs pre execution handler.
+            this.pre_execute().await?;
+
             let mut metrics = WriteMetrics::default();
             let exec_start = Instant::now();
 

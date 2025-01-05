@@ -4,6 +4,7 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use deltalake_core::logstore::*;
+use deltalake_core::operations::PreExecuteHandler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
@@ -150,4 +151,16 @@ fn put_options() -> &'static PutOptions {
         tags: TagSet::default(),
         attributes: Attributes::default(),
     })
+}
+
+pub struct LakeFSPreExecuteHandler {}
+
+impl PreExecuteHandler for LakeFSPreExecuteHandler {
+    fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
+        if let Some(lakefs_store) = log_store.as_any().downcast_ref::<Arc<LakeFSLogStore>>() {
+            let lakefs_url = lakefs_store.create_tnx_branch().await?;
+            lakefs_store.register_store(&lakefs_url);
+        }
+        Ok(())
+    }
 }

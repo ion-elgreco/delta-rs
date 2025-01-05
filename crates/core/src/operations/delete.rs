@@ -52,6 +52,7 @@ use crate::errors::DeltaResult;
 use crate::kernel::{Action, Add, Remove};
 use crate::logstore::LogStoreRef;
 use crate::operations::write::{write_execution_plan, write_execution_plan_cdc, WriterStatsConfig};
+use crate::operations::PreExecuteHandler;
 use crate::protocol::DeltaOperation;
 use crate::table::state::DeltaTableState;
 use crate::{DeltaTable, DeltaTableError};
@@ -74,6 +75,7 @@ pub struct DeleteBuilder {
     writer_properties: Option<WriterProperties>,
     /// Commit properties and configuration
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
 #[derive(Default, Debug, Serialize)]
@@ -95,7 +97,14 @@ pub struct DeleteMetrics {
     pub rewrite_time_ms: u64,
 }
 
-impl super::Operation<()> for DeleteBuilder {}
+impl super::Operation<()> for DeleteBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl DeleteBuilder {
     /// Create a new [`DeleteBuilder`]
@@ -107,6 +116,7 @@ impl DeleteBuilder {
             state: None,
             commit_properties: CommitProperties::default(),
             writer_properties: None,
+            pre_execute_handler: None,
         }
     }
 
@@ -131,6 +141,12 @@ impl DeleteBuilder {
     /// Writer properties passed to parquet writer for when files are rewritten
     pub fn with_writer_properties(mut self, writer_properties: WriterProperties) -> Self {
         self.writer_properties = Some(writer_properties);
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 }

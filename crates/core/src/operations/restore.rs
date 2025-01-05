@@ -23,6 +23,7 @@
 use std::cmp::max;
 use std::collections::HashSet;
 use std::ops::BitXor;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -38,6 +39,7 @@ use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableConfig, DeltaTableError, ObjectStoreError};
 
 use super::transaction::{CommitBuilder, CommitProperties, TransactionError};
+use super::{Operation, PreExecuteHandler};
 
 /// Errors that can occur during restore
 #[derive(thiserror::Error, Debug)]
@@ -87,9 +89,17 @@ pub struct RestoreBuilder {
     protocol_downgrade_allowed: bool,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for RestoreBuilder {}
+impl super::Operation<()> for RestoreBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl RestoreBuilder {
     /// Create a new [`RestoreBuilder`]
@@ -102,6 +112,7 @@ impl RestoreBuilder {
             ignore_missing_files: false,
             protocol_downgrade_allowed: false,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -133,6 +144,12 @@ impl RestoreBuilder {
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 }
@@ -318,6 +335,7 @@ impl std::future::IntoFuture for RestoreBuilder {
         let this = self;
 
         Box::pin(async move {
+            this.pre_execute().await?;
             let metrics = execute(
                 this.log_store.clone(),
                 this.snapshot.clone(),

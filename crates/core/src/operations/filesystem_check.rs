@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -25,6 +26,8 @@ use serde::Serialize;
 use url::{ParseError, Url};
 
 use super::transaction::{CommitBuilder, CommitProperties};
+use super::Operation;
+use super::PreExecuteHandler;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::{Action, Add, Remove};
 use crate::logstore::LogStoreRef;
@@ -34,7 +37,6 @@ use crate::DeltaTable;
 
 /// Audit the Delta Table's active files with the underlying file system.
 /// See this module's documentation for more information
-#[derive(Debug)]
 pub struct FileSystemCheckBuilder {
     /// A snapshot of the to-be-checked table's state
     snapshot: DeltaTableState,
@@ -44,6 +46,7 @@ pub struct FileSystemCheckBuilder {
     dry_run: bool,
     /// Commit properties and configuration
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
 /// Details of the FSCK operation including which files were removed from the log
@@ -73,7 +76,14 @@ fn is_absolute_path(path: &str) -> DeltaResult<bool> {
     }
 }
 
-impl super::Operation<()> for FileSystemCheckBuilder {}
+impl super::Operation<()> for FileSystemCheckBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl FileSystemCheckBuilder {
     /// Create a new [`FileSystemCheckBuilder`]
@@ -83,6 +93,7 @@ impl FileSystemCheckBuilder {
             log_store,
             dry_run: false,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -95,6 +106,12 @@ impl FileSystemCheckBuilder {
     /// Additonal information to write to the commit
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 
@@ -213,6 +230,7 @@ impl std::future::IntoFuture for FileSystemCheckBuilder {
                     },
                 ));
             }
+            this.pre_execute().await?;
 
             let metrics = plan.execute(&this.snapshot, this.commit_properties).await?;
             let mut table = DeltaTable::new_with_state(this.log_store, this.snapshot);

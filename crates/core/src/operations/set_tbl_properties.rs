@@ -1,10 +1,12 @@
 //! Set table properties on a table
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
 use super::transaction::{CommitBuilder, CommitProperties};
+use super::{Operation, PreExecuteHandler};
 use crate::kernel::Action;
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
@@ -24,6 +26,16 @@ pub struct SetTablePropertiesBuilder {
     log_store: LogStoreRef,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+}
+
+impl super::Operation<()> for SetTablePropertiesBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
 }
 
 impl SetTablePropertiesBuilder {
@@ -35,6 +47,7 @@ impl SetTablePropertiesBuilder {
             snapshot,
             log_store,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -55,6 +68,12 @@ impl SetTablePropertiesBuilder {
         self.commit_properties = commit_properties;
         self
     }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
 }
 
 impl std::future::IntoFuture for SetTablePropertiesBuilder {
@@ -66,6 +85,7 @@ impl std::future::IntoFuture for SetTablePropertiesBuilder {
         let this = self;
 
         Box::pin(async move {
+            this.pre_execute().await?;
             let mut metadata = this.snapshot.metadata().clone();
 
             let current_protocol = this.snapshot.protocol();

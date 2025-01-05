@@ -6,7 +6,9 @@
 //! the operations' behaviors and will return an updated table potentially in conjunction
 //! with a [data stream][datafusion::physical_plan::SendableRecordBatchStream],
 //! if the operation returns data as well.
+use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use add_feature::AddTableFeatureBuilder;
 #[cfg(feature = "datafusion")]
@@ -28,6 +30,7 @@ use self::{
     merge::MergeBuilder, update::UpdateBuilder, write::WriteBuilder,
 };
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::logstore::LogStoreRef;
 use crate::table::builder::DeltaTableBuilder;
 use crate::DeltaTable;
 
@@ -62,10 +65,25 @@ pub mod update;
 pub mod write;
 pub mod writer;
 
+#[async_trait]
+pub trait PreExecuteHandler: Send + Sync {
+    async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()>;
+}
+
 #[allow(unused)]
 /// The [Operation] trait defines common behaviors that all operations builders
 /// should have consistent
-pub(crate) trait Operation<State>: std::future::IntoFuture {}
+pub(crate) trait Operation<State>: std::future::IntoFuture {
+    fn get_log_store(&self) -> &LogStoreRef;
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>>;
+    async fn pre_execute(&self) -> DeltaResult<()> {
+        if let Some(handler) = self.get_pre_execute_handler() {
+            handler.execute(self.get_log_store()).await
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// High level interface for executing commands against a DeltaTable
 pub struct DeltaOps(pub DeltaTable);

@@ -64,6 +64,7 @@ use self::barrier::{MergeBarrier, MergeBarrierExec};
 
 use super::datafusion_utils::{into_expr, maybe_into_expr, Expression};
 use super::transaction::{CommitProperties, PROTOCOL};
+use super::{Operation, PreExecuteHandler};
 use crate::delta_datafusion::expr::{fmt_expr_to_sql, parse_predicate_expression};
 use crate::delta_datafusion::logical::MetricObserver;
 use crate::delta_datafusion::physical::{find_metric_node, get_metric, MetricObserverExec};
@@ -135,9 +136,17 @@ pub struct MergeBuilder {
     /// safe_cast determines how data types that do not match the underlying table are handled
     /// By default an error is returned
     safe_cast: bool,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for MergeBuilder {}
+impl super::Operation<()> for MergeBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl MergeBuilder {
     /// Create a new [`MergeBuilder`]
@@ -162,6 +171,7 @@ impl MergeBuilder {
             not_match_operations: Vec::new(),
             not_match_source_operations: Vec::new(),
             safe_cast: false,
+            pre_execute_handler: None,
         }
     }
 
@@ -379,6 +389,12 @@ impl MergeBuilder {
     /// Test123     ->      null
     pub fn with_safe_cast(mut self, safe_cast: bool) -> Self {
         self.safe_cast = safe_cast;
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 }
@@ -690,10 +706,6 @@ async fn execute(
     not_match_target_operations: Vec<MergeOperationConfig>,
     not_match_source_operations: Vec<MergeOperationConfig>,
 ) -> DeltaResult<(DeltaTableState, MergeMetrics)> {
-    if !snapshot.load_config().require_files {
-        return Err(DeltaTableError::NotInitializedWithFiles("MERGE".into()));
-    }
-
     let mut metrics = MergeMetrics::default();
     let exec_start = Instant::now();
     // Determining whether we should write change data once so that computation of change data can
@@ -1350,6 +1362,12 @@ impl std::future::IntoFuture for MergeBuilder {
 
         Box::pin(async move {
             PROTOCOL.can_write_to(&this.snapshot.snapshot)?;
+
+            if !this.snapshot.load_config().require_files {
+                return Err(DeltaTableError::NotInitializedWithFiles("MERGE".into()));
+            }
+
+            this.pre_execute().await?;
 
             let state = this.state.unwrap_or_else(|| {
                 let config: SessionConfig = DeltaSessionConfig::default().into();

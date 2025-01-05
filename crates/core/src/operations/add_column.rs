@@ -1,10 +1,13 @@
 //! Add a new column to a table
 
+use std::sync::Arc;
+
 use delta_kernel::schema::StructType;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 
 use super::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
+use super::{Operation, PreExecuteHandler};
 use crate::kernel::StructField;
 use crate::logstore::LogStoreRef;
 use crate::operations::cast::merge_schema::merge_delta_struct;
@@ -22,9 +25,17 @@ pub struct AddColumnBuilder {
     log_store: LogStoreRef,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for AddColumnBuilder {}
+impl super::Operation<()> for AddColumnBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl AddColumnBuilder {
     /// Create a new builder
@@ -34,6 +45,7 @@ impl AddColumnBuilder {
             log_store,
             fields: None,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -45,6 +57,12 @@ impl AddColumnBuilder {
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 }
@@ -59,10 +77,12 @@ impl std::future::IntoFuture for AddColumnBuilder {
 
         Box::pin(async move {
             let mut metadata = this.snapshot.metadata().clone();
-            let fields = match this.fields {
+            let fields = match this.fields.clone() {
                 Some(v) => v,
                 None => return Err(DeltaTableError::Generic("No fields provided".to_string())),
             };
+
+            this.pre_execute().await?;
 
             let fields_right = &StructType::new(fields.clone());
             let table_schema = this.snapshot.schema();

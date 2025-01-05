@@ -1,9 +1,12 @@
 //! Enable table features
 
+use std::sync::Arc;
+
 use futures::future::BoxFuture;
 use itertools::Itertools;
 
 use super::transaction::{CommitBuilder, CommitProperties};
+use super::{Operation, PreExecuteHandler};
 use crate::kernel::{ReaderFeatures, TableFeatures, WriterFeatures};
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
@@ -23,9 +26,17 @@ pub struct AddTableFeatureBuilder {
     log_store: LogStoreRef,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for AddTableFeatureBuilder {}
+impl super::Operation<()> for AddTableFeatureBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl AddTableFeatureBuilder {
     /// Create a new builder
@@ -36,6 +47,7 @@ impl AddTableFeatureBuilder {
             snapshot,
             log_store,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -63,6 +75,12 @@ impl AddTableFeatureBuilder {
         self.commit_properties = commit_properties;
         self
     }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
 }
 
 impl std::future::IntoFuture for AddTableFeatureBuilder {
@@ -77,8 +95,11 @@ impl std::future::IntoFuture for AddTableFeatureBuilder {
             let name = if this.name.is_empty() {
                 return Err(DeltaTableError::Generic("No features provided".to_string()));
             } else {
-                this.name
+                &this.name
             };
+
+            this.pre_execute().await?;
+
             let (reader_features, writer_features): (
                 Vec<Option<ReaderFeatures>>,
                 Vec<Option<WriterFeatures>>,
@@ -104,7 +125,9 @@ impl std::future::IntoFuture for AddTableFeatureBuilder {
             protocol = protocol.with_reader_features(reader_features);
             protocol = protocol.with_writer_features(writer_features);
 
-            let operation = DeltaOperation::AddFeature { name };
+            let operation = DeltaOperation::AddFeature {
+                name: name.to_vec(),
+            };
 
             let actions = vec![protocol.into()];
 

@@ -24,6 +24,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 
 use super::datafusion_utils::into_expr;
 use super::transaction::{CommitBuilder, CommitProperties};
+use super::{Operation, PreExecuteHandler};
 
 /// Build a constraint to add to a table
 pub struct ConstraintBuilder {
@@ -39,9 +40,17 @@ pub struct ConstraintBuilder {
     state: Option<SessionState>,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for ConstraintBuilder {}
+impl super::Operation<()> for ConstraintBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl ConstraintBuilder {
     /// Create a new builder
@@ -53,6 +62,7 @@ impl ConstraintBuilder {
             log_store,
             state: None,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -78,6 +88,12 @@ impl ConstraintBuilder {
         self.commit_properties = commit_properties;
         self
     }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
+        self
+    }
 }
 
 impl std::future::IntoFuture for ConstraintBuilder {
@@ -94,6 +110,8 @@ impl std::future::IntoFuture for ConstraintBuilder {
                     "ADD CONSTRAINTS".into(),
                 ));
             }
+
+            this.pre_execute().await?;
 
             let name = match this.name {
                 Some(v) => v,

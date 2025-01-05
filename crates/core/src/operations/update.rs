@@ -44,12 +44,15 @@ use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use tracing::log::*;
 
-use super::write::{write_execution_plan, write_execution_plan_cdc};
 use super::{
     datafusion_utils::Expression,
     transaction::{CommitBuilder, CommitProperties},
 };
 use super::{transaction::PROTOCOL, write::WriterStatsConfig};
+use super::{
+    write::{write_execution_plan, write_execution_plan_cdc},
+    Operation, PreExecuteHandler,
+};
 use crate::delta_datafusion::{find_files, planner::DeltaPlanner, register_store};
 use crate::kernel::{Action, Remove};
 use crate::logstore::LogStoreRef;
@@ -95,6 +98,7 @@ pub struct UpdateBuilder {
     /// safe_cast determines how data types that do not match the underlying table are handled
     /// By default an error is returned
     safe_cast: bool,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -114,7 +118,14 @@ pub struct UpdateMetrics {
     pub scan_time_ms: u64,
 }
 
-impl super::Operation<()> for UpdateBuilder {}
+impl super::Operation<()> for UpdateBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 impl UpdateBuilder {
     /// Create a new ['UpdateBuilder']
@@ -128,6 +139,7 @@ impl UpdateBuilder {
             writer_properties: None,
             commit_properties: CommitProperties::default(),
             safe_cast: false,
+            pre_execute_handler: None,
         }
     }
 
@@ -238,9 +250,6 @@ async fn execute(
     // For files that were identified, scan for records that match the predicate,
     // perform update operations, and then commit add and remove actions to
     // the log.
-    if !&snapshot.load_config().require_files {
-        return Err(DeltaTableError::NotInitializedWithFiles("UPDATE".into()));
-    }
 
     // NOTE: The optimize_projections rule is being temporarily disabled because it errors with
     // our schemas for Lists due to issues discussed
@@ -469,10 +478,15 @@ impl std::future::IntoFuture for UpdateBuilder {
 
     fn into_future(self) -> Self::IntoFuture {
         let this = self;
-
         Box::pin(async move {
             PROTOCOL.check_append_only(&this.snapshot.snapshot)?;
             PROTOCOL.can_write_to(&this.snapshot.snapshot)?;
+
+            if !&this.snapshot.load_config().require_files {
+                return Err(DeltaTableError::NotInitializedWithFiles("UPDATE".into()));
+            }
+
+            this.pre_execute().await?;
 
             let state = this.state.unwrap_or_else(|| {
                 let session: SessionContext = DeltaSessionContext::default().into();

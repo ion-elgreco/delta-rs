@@ -33,6 +33,7 @@ use object_store::{path::Path, ObjectStore};
 use serde::Serialize;
 
 use super::transaction::{CommitBuilder, CommitProperties};
+use super::{Operation, PreExecuteHandler};
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
@@ -75,7 +76,6 @@ pub trait Clock: Debug + Send + Sync {
     fn current_timestamp_millis(&self) -> i64;
 }
 
-#[derive(Debug)]
 /// Vacuum a Delta table with the given options
 /// See this module's documentation for more information
 pub struct VacuumBuilder {
@@ -93,9 +93,17 @@ pub struct VacuumBuilder {
     clock: Option<Arc<dyn Clock>>,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
+    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
 }
 
-impl super::Operation<()> for VacuumBuilder {}
+impl super::Operation<()> for VacuumBuilder {
+    fn get_log_store(&self) -> &LogStoreRef {
+        &self.log_store
+    }
+    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
+        self.pre_execute_handler.as_ref()
+    }
+}
 
 /// Details for the Vacuum operation including which files were
 #[derive(Debug)]
@@ -138,6 +146,7 @@ impl VacuumBuilder {
             dry_run: false,
             clock: None,
             commit_properties: CommitProperties::default(),
+            pre_execute_handler: None,
         }
     }
 
@@ -169,6 +178,12 @@ impl VacuumBuilder {
     /// Additional metadata to be added to commit info
     pub fn with_commit_properties(mut self, commit_properties: CommitProperties) -> Self {
         self.commit_properties = commit_properties;
+        self
+    }
+
+    /// Set a custom pre-execute handler.
+    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
+        self.pre_execute_handler = Some(handler);
         self
     }
 
@@ -255,6 +270,8 @@ impl std::future::IntoFuture for VacuumBuilder {
                     },
                 ));
             }
+
+            this.pre_execute().await?;
 
             let metrics = plan
                 .execute(
