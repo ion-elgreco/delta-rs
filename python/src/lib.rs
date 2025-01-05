@@ -56,6 +56,7 @@ use deltalake::protocol::{DeltaOperation, SaveMode};
 use deltalake::storage::IORuntime;
 use deltalake::DeltaTableBuilder;
 use deltalake::{DeltaOps, DeltaResult};
+use deltalake_lakefs::logstore::LakeFSPreExecuteHandler;
 use error::DeltaError;
 use futures::future::join_all;
 
@@ -1111,7 +1112,7 @@ impl RawDeltaTable {
 
     pub fn get_py_storage_backend(&self) -> PyResult<filesystem::DeltaFileSystemHandler> {
         Ok(filesystem::DeltaFileSystemHandler {
-            inner: self._table.object_store(),
+            inner: self._table.reading_object_store(),
             config: self._config.clone(),
             known_sizes: None,
         })
@@ -1858,7 +1859,7 @@ fn create_deltalake(
     custom_metadata: Option<HashMap<String, String>>,
 ) -> PyResult<()> {
     py.allow_threads(|| {
-        let table = DeltaTableBuilder::from_uri(table_uri)
+        let table = DeltaTableBuilder::from_uri(table_uri.clone())
             .with_storage_options(storage_options.unwrap_or_default())
             .build()
             .map_err(PythonError::from)?;
@@ -1890,6 +1891,10 @@ fn create_deltalake(
                 metadata.into_iter().map(|(k, v)| (k, v.into())).collect();
             builder = builder.with_metadata(json_metadata);
         };
+
+        if table_uri.starts_with("lakefs://") {
+            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+        }
 
         rt().block_on(builder.into_future())
             .map_err(PythonError::from)?;

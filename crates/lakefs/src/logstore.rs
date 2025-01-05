@@ -1,5 +1,6 @@
 //! Default implementation of [`LakeFSLogStore`] for LakeFS
 
+use std::any::Any;
 use std::sync::{Arc, OnceLock};
 
 use crate::client::LakeFSConfig;
@@ -7,11 +8,13 @@ use crate::client::LakeFSConfig;
 use super::client::LakeFSClient;
 use async_trait::async_trait;
 use bytes::Bytes;
+use delta_kernel::AsAny;
 use deltalake_core::operations::PreExecuteHandler;
+use deltalake_core::storage::url_prefix_handler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
-use deltalake_core::{logstore::*, DeltaTableError};
+use deltalake_core::{logstore::*, DeltaTableError, Path};
 use deltalake_core::{
     operations::transaction::TransactionError,
     storage::{ObjectStoreRef, StorageOptions},
@@ -83,6 +86,22 @@ impl LakeFSLogStore {
             client,
         }
     }
+    fn get_transaction_objectstore(&self) -> DeltaResult<(String, ObjectStoreRef)> {
+        let stores = self.storage.all_stores();
+
+        // Think of clever way to handle this, also what happens when multithread apps share the same logstore
+        // where never transactions keep getting inserted???
+        if stores.len() != 2 {
+            return Err(DeltaTableError::generic("The object_store registry inside LakeFSLogstore should not contain more than two stores. Something went wrong."));
+        }
+
+        for item in stores {
+            if item.key() != self.config().location.as_str() {
+                return Ok((item.key().to_owned(), item.value().clone()));
+            }
+        }
+        unreachable!()
+    }
 }
 
 #[async_trait::async_trait]
@@ -109,23 +128,58 @@ impl LogStore for LakeFSLogStore {
         version: i64,
         commit_or_bytes: CommitOrBytes,
     ) -> Result<(), TransactionError> {
+        let (url, store) =
+            self.get_transaction_objectstore()
+                .map_err(|e| TransactionError::LogStoreError {
+                    msg: e.to_string(),
+                    source: Box::new(e),
+                })?;
+
         match commit_or_bytes {
-            CommitOrBytes::LogBytes(log_bytes) => self
-                .object_store()
-                .put_opts(
-                    &commit_uri_from_version(version),
-                    log_bytes.into(),
-                    put_options().clone(),
-                )
-                .await
-                .map_err(|err| -> TransactionError {
-                    match err {
-                        ObjectStoreError::AlreadyExists { .. } => {
-                            TransactionError::VersionAlreadyExists(version)
+            CommitOrBytes::LogBytes(log_bytes) => {
+                store
+                    .put_opts(
+                        &commit_uri_from_version(version),
+                        log_bytes.into(),
+                        put_options().clone(),
+                    )
+                    .await
+                    .map_err(|err| -> TransactionError {
+                        match err {
+                            ObjectStoreError::AlreadyExists { .. } => {
+                                TransactionError::VersionAlreadyExists(version)
+                            }
+                            _ => TransactionError::from(err),
                         }
-                        _ => TransactionError::from(err),
+                    })?;
+                self.client
+                    .commit(url.clone(), version)
+                    .await
+                    .map_err(|e| TransactionError::LogStoreError {
+                        msg: e.to_string(),
+                        source: Box::new(e),
+                    })?;
+                match self
+                    .client
+                    .merge(
+                        &self.config().location,
+                        self.client.get_transaction(),
+                        version,
+                    )
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(TransactionError::VersionAlreadyExists(version)) => {
+                        store
+                            .delete(&commit_uri_from_version(version))
+                            .await
+                            .map_err(|err| TransactionError::from(err))?;
+                        return Err(TransactionError::VersionAlreadyExists(version));
                     }
-                })?,
+                    Err(err) => Err(err),
+                }?;
+                self.client.clear_transaction();
+            }
             _ => unreachable!(), // Default log store should never get a tmp_commit, since this is for conditional put stores
         };
         Ok(())
@@ -137,7 +191,14 @@ impl LogStore for LakeFSLogStore {
         commit_or_bytes: CommitOrBytes,
     ) -> Result<(), TransactionError> {
         match &commit_or_bytes {
-            CommitOrBytes::LogBytes(_) => Ok(()),
+            CommitOrBytes::LogBytes(_) => {
+                let (repo, _, _) = self.client.decompose_url(self.config.location.to_string());
+                self.client
+                    .delete_branch(repo, self.client.get_transaction())
+                    .await?;
+                self.client.clear_transaction();
+                Ok(())
+            }
             _ => unreachable!(), // Default log store should never get a tmp_commit, since this is for conditional put stores
         }
     }
@@ -155,20 +216,10 @@ impl LogStore for LakeFSLogStore {
     }
 
     fn object_store(&self) -> Arc<dyn ObjectStore> {
-        let stores = self.storage.all_stores();
-
-        // Think of clever way to handle this, also what happens when multithread apps share the same logstore
-        // where never transactions keep getting inserted???
-        if stores.len() != 2 {
-            panic!("the object_store registry inside logstore should not contain more than two stores.")
-        }
-
-        for item in stores {
-            if item.key() != self.config().location.as_str() {
-                return item.value().clone();
-            }
-        }
-        unreachable!()
+        let (_, store) = self.get_transaction_objectstore().expect(
+            "The object_store registry inside LakeFSLogstore should contain two stores at this stage. Something went wrong."
+        );
+        store
     }
 
     fn config(&self) -> &LogStoreConfig {
@@ -191,10 +242,13 @@ pub struct LakeFSPreExecuteHandler {}
 impl PreExecuteHandler for LakeFSPreExecuteHandler {
     async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
         if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
-            let lakefs_url = lakefs_store
+            let (lakefs_url, tnx_branch) = lakefs_store
                 .client
                 .create_txn_branch(&lakefs_store.config.location)
                 .await?;
+
+            lakefs_store.client.set_transaction(tnx_branch)?;
+
             // IMPORTANT: OBJECTSTORE NEEDS TOB BE WRAPPED IN URL PREFIX HANDLER, DON'T BE LIKE ME ^^
             let txn_store = url_prefix_handler(
                 lakefs_store.build_new_store(&lakefs_url)?,

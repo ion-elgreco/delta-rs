@@ -282,6 +282,11 @@ impl DeltaTable {
         self.log_store.object_store()
     }
 
+    /// get a shared reference of the reading delta object store
+    pub fn reading_object_store(&self) -> ObjectStoreRef {
+        self.log_store.reading_object_store()
+    }
+
     /// Check if the [`DeltaTable`] exists
     pub async fn verify_deltatable_existence(&self) -> DeltaResult<bool> {
         self.log_store.is_delta_table_location().await

@@ -34,6 +34,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 reqwest = {version = "*", features = ["json"]}
 http = "1.0.0"
+delta_kernel = { workspace = true, features = [] }
 
 [dev-dependencies]
 deltalake-core = { path = "../core", features = ["datafusion"] }

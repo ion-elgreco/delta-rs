@@ -470,7 +470,7 @@ pub async fn get_latest_version(
         let mut max_version: i64 = version_start;
         let prefix = Some(log_store.log_path());
         let offset_path = commit_uri_from_version(max_version);
-        let object_store = log_store.object_store();
+        let object_store = log_store.reading_object_store();
         let mut files = object_store.list_with_offset(prefix, &offset_path);
 
         while let Some(obj_meta) = files.next().await {
@@ -515,7 +515,7 @@ pub async fn get_earliest_version(
         let mut min_version: i64 = version_start;
         let prefix = Some(log_store.log_path());
         let offset_path = commit_uri_from_version(version_start);
-        let object_store = log_store.object_store();
+        let object_store = log_store.reading_object_store();
 
         // Manually filter until we can provide direction in https://github.com/apache/arrow-rs/issues/6274
         let mut files = object_store
