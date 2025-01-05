@@ -3,6 +3,7 @@
 //! This module also contains the [LakeFSLogStore] implementation for delta operations executed in transaction branches
 //! where deltalake commits only happen when the branch can be safely merged.
 
+pub mod client;
 pub mod errors;
 pub mod logstore;
 pub mod storage;
@@ -12,12 +13,14 @@ use deltalake_core::{DeltaResult, Path};
 use logstore::lakefs_logstore;
 use std::sync::Arc;
 use storage::LakeFSObjectStoreFactory;
+use storage::S3StorageOptionsConversion;
 use tracing::debug;
-use tracing::warn;
 use url::Url;
 
 #[derive(Clone, Debug, Default)]
 pub struct LakeFSLogStoreFactory {}
+
+impl S3StorageOptionsConversion for LakeFSLogStoreFactory {}
 
 impl LogStoreFactory for LakeFSLogStoreFactory {
     fn with_options(
@@ -26,9 +29,10 @@ impl LogStoreFactory for LakeFSLogStoreFactory {
         location: &Url,
         options: &StorageOptions,
     ) -> DeltaResult<Arc<dyn LogStore>> {
+        let options = self.with_env_s3(options);
         let store = url_prefix_handler(store, Path::parse(location.path())?);
         debug!("LakeFSLogStoreFactory has been asked to create a LogStore");
-        Ok(lakefs_logstore(store, location, options))
+        lakefs_logstore(store, location, &options)
     }
 }
 

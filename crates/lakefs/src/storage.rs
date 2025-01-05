@@ -13,7 +13,7 @@ use url::Url;
 #[derive(Clone, Default, Debug)]
 pub struct LakeFSObjectStoreFactory {}
 
-impl LakeFSObjectStoreFactory {
+pub(crate) trait S3StorageOptionsConversion {
     fn with_env_s3(&self, options: &StorageOptions) -> StorageOptions {
         let mut options = StorageOptions(
             options
@@ -56,6 +56,8 @@ impl LakeFSObjectStoreFactory {
         options
     }
 }
+
+impl S3StorageOptionsConversion for LakeFSObjectStoreFactory {}
 
 impl ObjectStoreFactory for LakeFSObjectStoreFactory {
     fn parse_url_opts(

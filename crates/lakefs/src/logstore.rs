@@ -2,12 +2,16 @@
 
 use std::sync::{Arc, OnceLock};
 
+use crate::client::LakeFSConfig;
+
+use super::client::LakeFSClient;
+use async_trait::async_trait;
 use bytes::Bytes;
-use deltalake_core::logstore::*;
 use deltalake_core::operations::PreExecuteHandler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
+use deltalake_core::{logstore::*, DeltaTableError};
 use deltalake_core::{
     operations::transaction::TransactionError,
     storage::{ObjectStoreRef, StorageOptions},
@@ -16,27 +20,43 @@ use deltalake_core::{
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
 use url::Url;
 
-/// Slim LakeFS client for lakefs branch operations.
-// pub struct LakeFSClient {
-//     /// DynamoDb client
-//     lakefs_client: Client,
-//     /// configuration of the
-//     config: LakeFSConfig,
-// }
-
 /// Return the [LakeFSLogStore] implementation with the provided configuration options
 pub fn lakefs_logstore(
     store: ObjectStoreRef,
     location: &Url,
     options: &StorageOptions,
-) -> Arc<dyn LogStore> {
-    Arc::new(LakeFSLogStore::new(
+) -> DeltaResult<Arc<dyn LogStore>> {
+    let host = options
+        .0
+        .get("aws_endpoint")
+        .ok_or(DeltaTableError::generic(
+            "LakeFS endpoint is missing in options. Set `endpoint`.",
+        ))?
+        .to_string();
+    let username = options
+        .0
+        .get("aws_access_key_id")
+        .ok_or(DeltaTableError::generic(
+            "LakeFS username is missing in options. Set `access_key_id`.",
+        ))?
+        .to_string();
+    let password = options
+        .0
+        .get("aws_secret_access_key")
+        .ok_or(DeltaTableError::generic(
+            "LakeFS password is missing in options. Set `secret_access_key`.",
+        ))?
+        .to_string();
+
+    let client = LakeFSClient::with_config(LakeFSConfig::new(host, username, password));
+    Ok(Arc::new(LakeFSLogStore::new(
         store,
         LogStoreConfig {
             location: location.clone(),
             options: options.clone(),
         },
-    ))
+        client,
+    )))
 }
 
 /// Default [`LogStore`] implementation
@@ -44,7 +64,7 @@ pub fn lakefs_logstore(
 pub struct LakeFSLogStore {
     pub(crate) storage: DefaultObjectStoreRegistry,
     config: LogStoreConfig,
-    // client: LakeFSClient,
+    client: LakeFSClient,
 }
 
 impl LakeFSLogStore {
@@ -54,16 +74,13 @@ impl LakeFSLogStore {
     ///
     /// * `storage` - A shared reference to an [`object_store::ObjectStore`] with "/" pointing at delta table root (i.e. where `_delta_log` is located).
     /// * `location` - A url corresponding to the storage location of `storage`.
-    pub fn new(
-        storage: ObjectStoreRef,
-        config: LogStoreConfig,
-        // client: LakeFSClient
-    ) -> Self {
+    pub fn new(storage: ObjectStoreRef, config: LogStoreConfig, client: LakeFSClient) -> Self {
         let registry = DefaultObjectStoreRegistry::new();
         registry.register_store(&config.location, storage);
         Self {
             storage: registry,
             config,
+            client,
         }
     }
 }
@@ -155,12 +172,25 @@ fn put_options() -> &'static PutOptions {
 
 pub struct LakeFSPreExecuteHandler {}
 
+#[async_trait]
 impl PreExecuteHandler for LakeFSPreExecuteHandler {
-    fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
-        if let Some(lakefs_store) = log_store.as_any().downcast_ref::<Arc<LakeFSLogStore>>() {
-            let lakefs_url = lakefs_store.create_tnx_branch().await?;
-            lakefs_store.register_store(&lakefs_url);
+    async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
+        if let Some(lakefs_store) = log_store
+            .clone()
+            .as_any()
+            .downcast_ref::<Arc<LakeFSLogStore>>()
+        {
+            let lakefs_url = lakefs_store
+                .client
+                .create_txn_branch(&lakefs_store.config.location)
+                .await?;
+            let txn_store = lakefs_store.build_new_store(&lakefs_url)?;
+            lakefs_store.register_object_store(&lakefs_url, txn_store);
+            Ok(())
+        } else {
+            Err(DeltaTableError::generic(
+                "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
+            ))
         }
-        Ok(())
     }
 }
