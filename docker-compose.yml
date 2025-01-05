@@ -11,14 +11,16 @@ services:
       - LAKEFS_STATS_ENABLED=${LAKEFS_STATS_ENABLED:-1}
       - LAKEFS_INSTALLATION_USER_NAME=delta
       - LAKEFS_INSTALLATION_ACCESS_KEY_ID=LAKEFSID
+      - LAKECTL_CREDENTIALS_ACCESS_KEY_ID=LAKEFSID
       - LAKEFS_INSTALLATION_SECRET_ACCESS_KEY=LAKEFSKEY
+      - LAKECTL_CREDENTIALS_SECRET_ACCESS_KEY=LAKEFSKEY
       - LAKECTL_SERVER_ENDPOINT_URL=http://localhost:8000
     entrypoint: ["/bin/sh", "-c"]
     command:
         - |
           lakefs run --local-settings &
           echo "---- Creating repository ----"
-          # wait-for -t 60 lakefs:8000 -- lakectl repo create lakefs://example local://example-repo || true
+          wait-for -t 60 lakefs:8000 -- lakectl repo create lakefs://bronze local://bronze || true
           echo ""
           echo "lakeFS Web UI: http://127.0.0.1:8000/      >(.＿.)<"
           echo "                                             (  )_ "
@@ -29,32 +31,32 @@ services:
           echo "-------- Let's go and have axolotl fun! --------"
           echo ""
           wait
-  # localstack:
-  #   image: localstack/localstack:0.14
-  #   ports:
-  #     - 4566:4566
-  #     - 8080:8080
-  #   environment:
-  #     - SERVICES=s3,dynamodb
-  #     - DEBUG=1
-  #     - DATA_DIR=/tmp/localstack/data
-  #     - PORT_WEB_UI=8080
-  #     - DOCKER_HOST=unix:///var/run/docker.sock
-  #     - HOST_TMP_FOLDER=${TMPDIR}
-  #     - AWS_ACCESS_KEY_ID=deltalake
-  #     - AWS_SECRET_ACCESS_KEY=weloverust
-  #   healthcheck:
-  #     test: [ "CMD", "curl", "-f", "http://localhost:4566/health" ]
+  localstack:
+    image: localstack/localstack:0.14
+    ports:
+      - 4566:4566
+      - 8080:8080
+    environment:
+      - SERVICES=s3,dynamodb
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+      - PORT_WEB_UI=8080
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - HOST_TMP_FOLDER=${TMPDIR}
+      - AWS_ACCESS_KEY_ID=deltalake
+      - AWS_SECRET_ACCESS_KEY=weloverust
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:4566/health" ]
 
-  # fake-gcs:
-  #   # Custom image - see fsouza/fake-gcs-server#1164
-  #   image: tustvold/fake-gcs-server
-  #   command: ["-scheme", "http", "-public-host", "localhost:4443", "-backend", "memory"]
-  #   ports:
-  #     - 4443:4443
+  fake-gcs:
+    # Custom image - see fsouza/fake-gcs-server#1164
+    image: tustvold/fake-gcs-server
+    command: ["-scheme", "http", "-public-host", "localhost:4443", "-backend", "memory"]
+    ports:
+      - 4443:4443
 
-  # azurite:
-  #   image: mcr.microsoft.com/azure-storage/azurite
-  #   ports:
-  #     - 10000:10000
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite
+    ports:
+      - 10000:10000
   
