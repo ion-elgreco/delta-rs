@@ -10,7 +10,6 @@ use deltalake::operations::merge::MergeBuilder;
 use deltalake::operations::PreExecuteHandler;
 use deltalake::table::state::DeltaTableState;
 use deltalake::{DeltaResult, DeltaTable};
-use deltalake_lakefs::logstore::LakeFSPreExecuteHandler;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::future::IntoFuture;

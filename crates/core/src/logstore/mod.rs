@@ -261,10 +261,10 @@ pub trait LogStore: Send + Sync + AsAny {
         Ok(PeekCommit::New(next_version, actions.unwrap()))
     }
 
-    /// Get writing object store.
+    /// Get object store for writing operations.
     fn object_store(&self) -> Arc<dyn ObjectStore>;
 
-    /// Get reading object store
+    /// Get object store for reading operations.
     fn reading_object_store(&self) -> Arc<dyn ObjectStore>;
 
     /// [Path] to Delta log

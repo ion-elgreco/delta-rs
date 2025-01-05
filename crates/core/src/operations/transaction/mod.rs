@@ -706,7 +706,7 @@ impl PostCommit<'_> {
         } else {
             let state = DeltaTableState::try_new(
                 &Path::default(),
-                self.log_store.object_store(),
+                self.log_store.reading_object_store(),
                 Default::default(),
                 Some(self.version),
             )

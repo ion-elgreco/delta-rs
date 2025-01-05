@@ -144,7 +144,7 @@ impl LogSegment {
         log_store.refresh().await?;
         let log_url = table_root.child("_delta_log");
         let (mut commit_files, checkpoint_files) = list_log_files(
-            log_store.object_store().as_ref(),
+            log_store.reading_object_store().as_ref(),
             &log_url,
             end_version,
             Some(start_version),
@@ -824,12 +824,12 @@ pub(super) mod tests {
         let batches = LogSegment::try_new(
             &Path::default(),
             Some(commit.version),
-            log_store.object_store().as_ref(),
+            log_store.reading_object_store().as_ref(),
         )
         .await
         .unwrap()
         .checkpoint_stream(
-            log_store.object_store(),
+            log_store.reading_object_store(),
             &StructType::new(vec![
                 ActionType::Metadata.schema_field().clone(),
                 ActionType::Protocol.schema_field().clone(),

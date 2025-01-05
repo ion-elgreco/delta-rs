@@ -382,7 +382,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -432,7 +432,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -490,7 +490,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             let converted_filters =
                 convert_partition_filters(partition_filters.unwrap_or_default())
                     .map_err(PythonError::from)?;
@@ -556,7 +556,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             let converted_filters =
                 convert_partition_filters(partition_filters.unwrap_or_default())
                     .map_err(PythonError::from)?;
@@ -598,7 +598,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -631,7 +631,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -665,7 +665,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
@@ -698,7 +698,7 @@ impl RawDeltaTable {
             if self._config.root_url.starts_with("lakefs://") {
                 cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
             }
-    
+
             rt().block_on(cmd.into_future()).map_err(PythonError::from)
         })?;
         self._table.state = table.state;
