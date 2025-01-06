@@ -8,10 +8,10 @@ use super::client::LakeFSClient;
 use async_trait::async_trait;
 use bytes::Bytes;
 use deltalake_core::operations::PreExecuteHandler;
-use deltalake_core::storage::url_prefix_handler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
+use deltalake_core::storage::{url_prefix_handler, DeltaIOStorageBackend, IORuntime};
 use deltalake_core::{logstore::*, DeltaTableError, Path};
 use deltalake_core::{
     operations::transaction::TransactionError,
@@ -85,20 +85,15 @@ impl LakeFSLogStore {
         }
     }
     fn get_transaction_objectstore(&self) -> DeltaResult<(String, ObjectStoreRef)> {
-        let stores = self.storage.all_stores();
-
-        // Think of clever way to handle this, also what happens when multithread apps share the same logstore
-        // where never transactions keep getting inserted???
-        if stores.len() != 2 {
-            return Err(DeltaTableError::generic("The object_store registry inside LakeFSLogstore should not contain more than two stores. Something went wrong."));
-        }
-
-        for item in stores {
-            if item.key() != self.config().location.as_str() {
-                return Ok((item.key().to_owned(), item.value().clone()));
-            }
-        }
-        unreachable!()
+        let (repo, _, table) = self.client.decompose_url(self.config.location.to_string());
+        let string_url = format!(
+            "lakefs://{}/{}/{}",
+            repo,
+            self.client.get_transaction(),
+            table
+        );
+        let transaction_url = Url::parse(&string_url).unwrap();
+        Ok((string_url, self.storage.get_store(&transaction_url)?))
     }
 }
 
@@ -166,7 +161,14 @@ impl LogStore for LakeFSLogStore {
                     )
                     .await
                 {
-                    Ok(_) => Ok(()),
+                    Ok(_) => {
+                        let (repo, _, _) =
+                            self.client.decompose_url(self.config.location.to_string());
+                        self.client
+                            .delete_branch(repo, self.client.get_transaction())
+                            .await?;
+                        Ok(())
+                    }
                     Err(TransactionError::VersionAlreadyExists(version)) => {
                         store
                             .delete(&commit_uri_from_version(version))
@@ -215,7 +217,7 @@ impl LogStore for LakeFSLogStore {
 
     fn object_store(&self) -> Arc<dyn ObjectStore> {
         let (_, store) = self.get_transaction_objectstore().expect(
-            "The object_store registry inside LakeFSLogstore should contain two stores at this stage. Something went wrong."
+            "The object_store registry inside LakeFSLogstore contain the Transaction store. Something went wrong."
         );
         store
     }
@@ -242,14 +244,16 @@ impl PreExecuteHandler for LakeFSPreExecuteHandler {
         if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
             let (lakefs_url, tnx_branch) = lakefs_store
                 .client
-                .create_txn_branch(&lakefs_store.config.location)
+                .create_branch(&lakefs_store.config.location)
                 .await?;
 
             lakefs_store.client.set_transaction(tnx_branch)?;
 
-            // IMPORTANT: OBJECTSTORE NEEDS TOB BE WRAPPED IN URL PREFIX HANDLER, DON'T BE LIKE ME ^^
             let txn_store = url_prefix_handler(
-                lakefs_store.build_new_store(&lakefs_url)?,
+                Arc::new(DeltaIOStorageBackend::new(
+                    lakefs_store.build_new_store(&lakefs_url)?,
+                    IORuntime::default().get_handle(),
+                )) as ObjectStoreRef,
                 Path::parse(lakefs_url.path())?,
             );
 

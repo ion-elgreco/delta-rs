@@ -682,16 +682,18 @@ impl PostCommit<'_> {
                 snapshot.advance(vec![&self.data])?;
             }
             let state = DeltaTableState { snapshot };
-            // Execute each hook
-            if self.create_checkpoint {
-                self.create_checkpoint(&state, &self.log_store, self.version)
-                    .await?;
-            }
+
             let cleanup_logs = if let Some(cleanup_logs) = self.cleanup_expired_logs {
                 cleanup_logs
             } else {
                 state.table_config().enable_expired_log_cleanup()
             };
+
+            // Execute each hook
+            if self.create_checkpoint {
+                self.create_checkpoint(&state, &self.log_store, self.version)
+                    .await?;
+            }
 
             if cleanup_logs {
                 cleanup_expired_logs_for(

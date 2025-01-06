@@ -46,7 +46,7 @@ impl LakeFSClient {
         }
     }
 
-    pub async fn create_txn_branch(&self, source_url: &Url) -> DeltaResult<(Url, String)> {
+    pub async fn create_branch(&self, source_url: &Url) -> DeltaResult<(Url, String)> {
         let (repo, source_branch, table) = self.decompose_url(source_url.to_string());
 
         let request_url = format!("{}/api/v1/repositories/{}/branches", self.config.host, repo);
@@ -166,7 +166,7 @@ impl LakeFSClient {
         );
 
         let body = json!({
-            "message": format!("commit: deltalake transaction for table: {}, version: {}", table, commit_version),
+            "message": format!("deltalake commit {{ table: {}, version: {}}}", table, commit_version),
         });
 
         debug!("Committing to LakeFS Branch: {}.", branch);
@@ -217,7 +217,7 @@ impl LakeFSClient {
         );
 
         let body = json!({
-            "message": format!("completed deltalake transaction for table: {}, version: {}", table, commit_version),
+            "message": format!("Finished deltalake transaction {{ table: {}, version: {} }}", table, commit_version),
         });
 
         debug!(
