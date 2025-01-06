@@ -68,6 +68,7 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyCapsule, PyDict, PyFrozenSet};
 use serde_json::{Map, Value};
+use uuid::Uuid;
 
 use crate::error::DeltaProtocolError;
 use crate::error::PythonError;
@@ -1291,15 +1292,40 @@ impl RawDeltaTable {
 
     pub fn create_checkpoint(&self, py: Python) -> PyResult<()> {
         py.allow_threads(|| {
-            rt().block_on(async {
+            let operation_id = Uuid::new_v4();
+            let handle = Arc::new(LakeFSCustomExecuteHandler {});
+            let store = &self.log_store()?;
+
+            // Runs lakefs pre-execution
+            if store.name() == "LakeFSLogStore" {
+                rt().block_on(async {
+                    handle
+                        .before_post_commit_hook(store, true, operation_id)
+                        .await
+                })
+                .map_err(PythonError::from)?;
+            }
+
+            let result = rt().block_on(async {
                 match self._table.lock() {
-                    Ok(table) => create_checkpoint(&table)
+                    Ok(table) => create_checkpoint(&table, Some(operation_id))
                         .await
                         .map_err(PythonError::from)
                         .map_err(PyErr::from),
                     Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
                 }
-            })
+            });
+
+            // Runs lakefs post-execution for file operations
+            if store.name() == "LakeFSLogStore" {
+                rt().block_on(async {
+                    handle
+                        .after_post_commit_hook(store, true, operation_id)
+                        .await
+                })
+                .map_err(PythonError::from)?;
+            }
+            result
         })?;
 
         Ok(())
@@ -1307,15 +1333,40 @@ impl RawDeltaTable {
 
     pub fn cleanup_metadata(&self, py: Python) -> PyResult<()> {
         py.allow_threads(|| {
-            rt().block_on(async {
+            let operation_id = Uuid::new_v4();
+            let handle = Arc::new(LakeFSCustomExecuteHandler {});
+            let store = &self.log_store()?;
+
+            // Runs lakefs pre-execution
+            if store.name() == "LakeFSLogStore" {
+                rt().block_on(async {
+                    handle
+                        .before_post_commit_hook(store, true, operation_id)
+                        .await
+                })
+                .map_err(PythonError::from)?;
+            }
+
+            let result = rt().block_on(async {
                 match self._table.lock() {
-                    Ok(table) => cleanup_metadata(&table)
+                    Ok(table) => cleanup_metadata(&table, Some(operation_id))
                         .await
                         .map_err(PythonError::from)
                         .map_err(PyErr::from),
                     Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
                 }
-            })
+            });
+
+            // Runs lakefs post-execution for file operations
+            if store.name() == "LakeFSLogStore" {
+                rt().block_on(async {
+                    handle
+                        .after_post_commit_hook(store, true, operation_id)
+                        .await
+                })
+                .map_err(PythonError::from)?;
+            }
+            result
         })?;
 
         Ok(())

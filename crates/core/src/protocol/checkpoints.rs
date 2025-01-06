@@ -87,12 +87,12 @@ impl From<Utf8Error> for ProtocolError {
 pub const CHECKPOINT_RECORD_BATCH_SIZE: usize = 5000;
 
 /// Creates checkpoint at current table version
-pub async fn create_checkpoint(table: &DeltaTable) -> Result<(), ProtocolError> {
+pub async fn create_checkpoint(table: &DeltaTable, operation_id: Option<Uuid>) -> Result<(), ProtocolError> {
     create_checkpoint_for(
         table.version(),
         table.snapshot().map_err(|_| ProtocolError::NoMetaData)?,
         table.log_store.as_ref(),
-        None,
+        operation_id,
     )
     .await?;
     Ok(())
@@ -100,7 +100,7 @@ pub async fn create_checkpoint(table: &DeltaTable) -> Result<(), ProtocolError> 
 
 /// Delete expires log files before given version from table. The table log retention is based on
 /// the `logRetentionDuration` property of the Delta Table, 30 days by default.
-pub async fn cleanup_metadata(table: &DeltaTable) -> Result<usize, ProtocolError> {
+pub async fn cleanup_metadata(table: &DeltaTable, operation_id: Option<Uuid>) -> Result<usize, ProtocolError> {
     let log_retention_timestamp = Utc::now().timestamp_millis()
         - table
             .snapshot()
@@ -112,7 +112,7 @@ pub async fn cleanup_metadata(table: &DeltaTable) -> Result<usize, ProtocolError
         table.version(),
         table.log_store.as_ref(),
         log_retention_timestamp,
-        None,
+        operation_id,
     )
     .await
 }
@@ -124,6 +124,7 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
     table_uri: &str,
     version: i64,
     cleanup: Option<bool>,
+    operation_id: Option<Uuid>,
 ) -> Result<(), ProtocolError> {
     let table = open_table_with_version(table_uri, version)
         .await
@@ -135,7 +136,7 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
         cleanup.unwrap_or_else(|| snapshot.table_config().enable_expired_log_cleanup());
 
     if table.version() >= 0 && enable_expired_log_cleanup {
-        let deleted_log_num = cleanup_metadata(&table).await?;
+        let deleted_log_num = cleanup_metadata(&table, operation_id).await?;
         debug!("Deleted {:?} log files.", deleted_log_num);
     }
 
@@ -911,7 +912,7 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_with_checkpoints() {
         let table = setup_table().await;
-        create_checkpoint(&table).await.unwrap();
+        create_checkpoint(&table, None).await.unwrap();
 
         let log_retention_timestamp = (Utc::now().timestamp_millis()
             + Duration::days(32).num_milliseconds())
@@ -1071,7 +1072,7 @@ mod tests {
         .unwrap();
         let table = DeltaOps::new_in_memory().write(vec![batch]).await.unwrap();
 
-        create_checkpoint(&table).await.unwrap();
+        create_checkpoint(&table, None).await.unwrap();
     }
 
     lazy_static! {
@@ -1161,7 +1162,7 @@ mod tests {
         let pre_checkpoint_actions = table.snapshot()?.file_actions()?;
 
         let before = table.version();
-        let res = create_checkpoint(&table).await;
+        let res = create_checkpoint(&table, None).await;
         assert!(res.is_ok(), "Failed to create the checkpoint! {res:#?}");
 
         let table = crate::open_table(&table_path).await?;
@@ -1210,7 +1211,7 @@ mod tests {
         table.load().await?;
         assert_eq!(table.version(), 0);
 
-        create_checkpoint(&table).await?;
+        create_checkpoint(&table, None).await?;
 
         let batch = RecordBatch::try_new(
             Arc::clone(&get_arrow_schema(&None)),

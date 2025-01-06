@@ -381,7 +381,7 @@ impl DeltaTable {
             Some(ts) => Ok(ts),
             None => {
                 let meta = self
-                    .object_store()
+                    .reading_object_store()
                     .head(&commit_uri_from_version(version))
                     .await?;
                 let ts = meta.last_modified.timestamp_millis();

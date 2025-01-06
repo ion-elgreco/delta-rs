@@ -385,8 +385,6 @@ impl CustomExecuteHandler for LakeFSCustomExecuteHandler {
         file_operations: bool,
         operation_id: Uuid,
     ) -> DeltaResult<()> {
-        // don't need this anymore perhaps
-
         if file_operations {
             debug!("Running LakeFS pre execution inside post_commit_hook");
             if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>()
