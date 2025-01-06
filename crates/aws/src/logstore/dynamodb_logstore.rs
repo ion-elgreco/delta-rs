@@ -8,7 +8,6 @@ use crate::storage::S3StorageOptions;
 use crate::{constants, CommitEntry, DynamoDbLockClient, UpdateLogEntryResult};
 
 use bytes::Bytes;
-use deltalake_core::storage::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use deltalake_core::{ObjectStoreError, Path};
 use tracing::{debug, error, warn};
 use url::Url;
@@ -26,7 +25,7 @@ const MAX_REPAIR_RETRIES: i64 = 3;
 
 /// [`LogStore`] implementation backed by DynamoDb
 pub struct S3DynamoDbLogStore {
-    pub(crate) storage: DefaultObjectStoreRegistry,
+    pub(crate) storage: ObjectStoreRef,
     lock_client: DynamoDbLockClient,
     config: LogStoreConfig,
     table_path: String,
@@ -73,10 +72,8 @@ impl S3DynamoDbLogStore {
             },
         })?;
         let table_path = to_uri(&location, &Path::from(""));
-        let registry = DefaultObjectStoreRegistry::new();
-        registry.register_store(&location, object_store);
         Ok(Self {
-            storage: registry,
+            storage: object_store,
             lock_client,
             config: LogStoreConfig {
                 location,
@@ -174,10 +171,6 @@ impl S3DynamoDbLogStore {
 impl LogStore for S3DynamoDbLogStore {
     fn name(&self) -> String {
         "S3DynamoDbLogStore".into()
-    }
-
-    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
-        self.storage.register_store(url, store);
     }
 
     fn root_uri(&self) -> String {
@@ -321,7 +314,7 @@ impl LogStore for S3DynamoDbLogStore {
     }
 
     fn object_store(&self, _operation_id: Option<Uuid>) -> ObjectStoreRef {
-        self.storage.get_store(&self.config.location).unwrap()
+        self.storage.clone()
     }
 
     fn reading_object_store(&self) -> ObjectStoreRef {

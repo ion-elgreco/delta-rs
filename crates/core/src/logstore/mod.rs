@@ -203,9 +203,6 @@ pub trait LogStore: Send + Sync + AsAny {
         Ok(())
     }
 
-    /// Register a new object store in the storage registry
-    fn register_object_store(&self, url: &Url, store: ObjectStoreRef);
-
     /// Build a new object store for an URL using the existing storage options
     fn build_new_store(&self, url: &Url) -> DeltaResult<ObjectStoreRef> {
         // turn location into scheme

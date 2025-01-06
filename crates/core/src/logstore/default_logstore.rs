@@ -55,10 +55,6 @@ impl LogStore for DefaultLogStore {
         "DefaultLogStore".into()
     }
 
-    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
-        self.storage.register_store(url, store);
-    }
-
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {
         super::read_commit_entry(self.object_store(None).as_ref(), version).await
     }

@@ -86,6 +86,11 @@ impl LakeFSLogStore {
             client,
         }
     }
+
+    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
+        self.storage.register_store(url, store);
+    }
+
     fn get_transaction_objectstore(
         &self,
         operation_id: Uuid,
@@ -189,10 +194,6 @@ impl LakeFSLogStore {
 impl LogStore for LakeFSLogStore {
     fn name(&self) -> String {
         "LakeFSLogStore".into()
-    }
-
-    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
-        self.storage.register_store(url, store);
     }
 
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {

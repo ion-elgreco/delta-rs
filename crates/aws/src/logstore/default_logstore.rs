@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use deltalake_core::logstore::*;
-use deltalake_core::storage::{DefaultObjectStoreRegistry, ObjectStoreRegistry};
 use deltalake_core::{
     operations::transaction::TransactionError,
     storage::{ObjectStoreRef, StorageOptions},
@@ -32,7 +31,7 @@ pub fn default_s3_logstore(
 /// Default [`LogStore`] implementation
 #[derive(Debug, Clone)]
 pub struct S3LogStore {
-    pub(crate) storage: DefaultObjectStoreRegistry,
+    pub(crate) storage: ObjectStoreRef,
     config: LogStoreConfig,
 }
 
@@ -44,12 +43,7 @@ impl S3LogStore {
     /// * `storage` - A shared reference to an [`object_store::ObjectStore`] with "/" pointing at delta table root (i.e. where `_delta_log` is located).
     /// * `location` - A url corresponding to the storage location of `storage`.
     pub fn new(storage: ObjectStoreRef, config: LogStoreConfig) -> Self {
-        let registry = DefaultObjectStoreRegistry::new();
-        registry.register_store(&config.location, storage);
-        Self {
-            storage: registry,
-            config,
-        }
+        Self { storage, config }
     }
 }
 
@@ -57,10 +51,6 @@ impl S3LogStore {
 impl LogStore for S3LogStore {
     fn name(&self) -> String {
         "S3LogStore".into()
-    }
-
-    fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {
-        self.storage.register_store(url, store);
     }
 
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {
@@ -121,7 +111,7 @@ impl LogStore for S3LogStore {
     }
 
     fn object_store(&self, _operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
-        self.storage.get_store(&self.config.location).unwrap()
+        self.storage.clone()
     }
 
     fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
