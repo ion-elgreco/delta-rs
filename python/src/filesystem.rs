@@ -71,7 +71,7 @@ impl DeltaFileSystemHandler {
         options: Option<HashMap<String, String>>,
         known_sizes: Option<HashMap<String, i64>>,
     ) -> PyResult<Self> {
-        let storage = table._table.reading_object_store();
+        let storage = table.reading_object_store()?;
         Ok(Self {
             inner: storage,
             config: FsConfig {
