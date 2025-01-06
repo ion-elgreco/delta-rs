@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use dashmap::DashMap;
 use deltalake_core::operations::transaction::TransactionError;
 use deltalake_core::{DeltaResult, DeltaTableError};

@@ -218,7 +218,7 @@ impl LogStore for S3DynamoDbLogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
-        operation_id: Uuid,
+        _operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         let tmp_commit = match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
@@ -268,7 +268,7 @@ impl LogStore for S3DynamoDbLogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
-        operation_id: Uuid,
+        _operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         let tmp_commit = match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
@@ -320,7 +320,7 @@ impl LogStore for S3DynamoDbLogStore {
         get_earliest_version(self, current_version).await
     }
 
-    fn object_store(&self, operation_id: Option<Uuid>) -> ObjectStoreRef {
+    fn object_store(&self, _operation_id: Option<Uuid>) -> ObjectStoreRef {
         self.storage.get_store(&self.config.location).unwrap()
     }
 

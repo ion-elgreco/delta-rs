@@ -76,7 +76,7 @@ impl LogStore for S3LogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
-        operation_id: Uuid,
+        _operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
@@ -102,7 +102,7 @@ impl LogStore for S3LogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
-        operation_id: Uuid,
+        _operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         match &commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
@@ -120,7 +120,7 @@ impl LogStore for S3LogStore {
         get_earliest_version(self, current_version).await
     }
 
-    fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
+    fn object_store(&self, _operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
         self.storage.get_store(&self.config.location).unwrap()
     }
 
