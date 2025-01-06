@@ -42,6 +42,7 @@ def lakefs_storage_options():
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_create(lakefs_path: str, sample_data: pa.Table, lakefs_storage_options):
     dt = DeltaTable.create(
         lakefs_path,
@@ -90,6 +91,7 @@ def test_create(lakefs_path: str, sample_data: pa.Table, lakefs_storage_options)
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_delete(lakefs_path: str, sample_data: pa.Table, lakefs_storage_options):
     write_deltalake(
         lakefs_path,
@@ -114,6 +116,7 @@ def test_delete(lakefs_path: str, sample_data: pa.Table, lakefs_storage_options)
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_optimize_min_commit_interval(
     lakefs_path: str, sample_data: pa.Table, lakefs_storage_options
 ):
@@ -154,6 +157,7 @@ def test_optimize_min_commit_interval(
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_optimize(lakefs_path: str, sample_data: pa.Table, lakefs_storage_options):
     write_deltalake(
         lakefs_path,
@@ -191,6 +195,7 @@ def test_optimize(lakefs_path: str, sample_data: pa.Table, lakefs_storage_option
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_repair_wo_dry_run(
     lakefs_path, sample_data, lakefs_storage_options, lakefs_client: "lakefs.Client"
 ):
@@ -221,6 +226,7 @@ def test_repair_wo_dry_run(
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_add_constraint(lakefs_path, sample_table: pa.Table, lakefs_storage_options):
     write_deltalake(lakefs_path, sample_table, storage_options=lakefs_storage_options)
 
@@ -257,6 +263,7 @@ def test_add_constraint(lakefs_path, sample_table: pa.Table, lakefs_storage_opti
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_drop_constraint(lakefs_path, sample_table: pa.Table, lakefs_storage_options):
     write_deltalake(lakefs_path, sample_table, storage_options=lakefs_storage_options)
 
@@ -270,6 +277,7 @@ def test_drop_constraint(lakefs_path, sample_table: pa.Table, lakefs_storage_opt
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_set_table_properties(
     lakefs_path, sample_table: pa.Table, lakefs_storage_options
 ):
@@ -290,6 +298,7 @@ def test_set_table_properties(
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_add_feautres(lakefs_path, sample_table: pa.Table, lakefs_storage_options):
     write_deltalake(lakefs_path, sample_table, storage_options=lakefs_storage_options)
     dt = DeltaTable(lakefs_path, storage_options=lakefs_storage_options)
@@ -316,6 +325,7 @@ def test_add_feautres(lakefs_path, sample_table: pa.Table, lakefs_storage_option
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_merge(lakefs_path, sample_table: pa.Table, lakefs_storage_options):
     write_deltalake(
         lakefs_path, sample_table, mode="append", storage_options=lakefs_storage_options
@@ -357,6 +367,7 @@ def test_merge(lakefs_path, sample_table: pa.Table, lakefs_storage_options):
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_restore(
     lakefs_path,
     sample_data: pa.Table,
@@ -383,6 +394,7 @@ def test_restore(
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_add_column(lakefs_path, sample_data: pa.Table, lakefs_storage_options):
     write_deltalake(
         lakefs_path, sample_data, mode="append", storage_options=lakefs_storage_options
@@ -419,6 +431,7 @@ def sample_table_update():
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_update(lakefs_path, sample_table_update: pa.Table, lakefs_storage_options):
     write_deltalake(
         lakefs_path,
@@ -456,6 +469,7 @@ def test_update(lakefs_path, sample_table_update: pa.Table, lakefs_storage_optio
 
 
 @pytest.mark.lakefs
+@pytest.mark.integration
 def test_checkpoint(sample_data: pa.Table, lakefs_storage_options, lakefs_client):
     import lakefs
 
