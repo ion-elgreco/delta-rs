@@ -19,6 +19,7 @@ use deltalake_core::{
     storage::{ObjectStoreRef, StorageOptions},
     DeltaResult, DeltaTableError,
 };
+use uuid::Uuid;
 
 const STORE_NAME: &str = "DeltaS3ObjectStore";
 const MAX_REPAIR_RETRIES: i64 = 3;
@@ -97,7 +98,7 @@ impl S3DynamoDbLogStore {
         }
         for retry in 0..=MAX_REPAIR_RETRIES {
             match write_commit_entry(
-                self.object_store().as_ref(),
+                self.object_store(None).as_ref(),
                 entry.version,
                 &entry.temp_path,
             )
@@ -205,7 +206,7 @@ impl LogStore for S3DynamoDbLogStore {
         if let Ok(Some(entry)) = entry {
             self.repair_entry(&entry).await?;
         }
-        read_commit_entry(self.object_store().as_ref(), version).await
+        read_commit_entry(self.object_store(None).as_ref(), version).await
     }
 
     /// Tries to commit a prepared commit file. Returns [DeltaTableError::VersionAlreadyExists]
@@ -217,6 +218,7 @@ impl LogStore for S3DynamoDbLogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         let tmp_commit = match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
@@ -266,6 +268,7 @@ impl LogStore for S3DynamoDbLogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         let tmp_commit = match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => tmp_commit,
@@ -291,7 +294,7 @@ impl LogStore for S3DynamoDbLogStore {
                 },
             })?;
 
-        abort_commit_entry(self.object_store().as_ref(), version, &tmp_commit).await?;
+        abort_commit_entry(self.object_store(None).as_ref(), version, &tmp_commit).await?;
         Ok(())
     }
 
@@ -317,12 +320,12 @@ impl LogStore for S3DynamoDbLogStore {
         get_earliest_version(self, current_version).await
     }
 
-    fn object_store(&self) -> ObjectStoreRef {
+    fn object_store(&self, operation_id: Option<Uuid>) -> ObjectStoreRef {
         self.storage.get_store(&self.config.location).unwrap()
     }
 
     fn reading_object_store(&self) -> ObjectStoreRef {
-        self.object_store()
+        self.object_store(None)
     }
 
     fn config(&self) -> &LogStoreConfig {

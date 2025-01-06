@@ -48,7 +48,7 @@ use deltalake::operations::transaction::{
 };
 use deltalake::operations::update::UpdateBuilder;
 use deltalake::operations::vacuum::VacuumBuilder;
-use deltalake::operations::{collect_sendable_stream, PreExecuteHandler};
+use deltalake::operations::{collect_sendable_stream, CustomExecuteHandler};
 use deltalake::parquet::basic::Compression;
 use deltalake::parquet::errors::ParquetError;
 use deltalake::parquet::file::properties::WriterProperties;
@@ -58,7 +58,7 @@ use deltalake::storage::{IORuntime, ObjectStoreRef};
 use deltalake::table::state::DeltaTableState;
 use deltalake::DeltaTableBuilder;
 use deltalake::{DeltaOps, DeltaResult};
-use deltalake_lakefs::logstore::LakeFSPreExecuteHandler;
+use deltalake_lakefs::logstore::LakeFSCustomExecuteHandler;
 use error::DeltaError;
 use futures::future::join_all;
 use tracing::log::*;
@@ -499,7 +499,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -548,7 +548,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -605,7 +605,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             let converted_filters =
@@ -670,7 +670,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             let converted_filters =
@@ -711,7 +711,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -743,7 +743,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -776,7 +776,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -808,7 +808,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -913,9 +913,9 @@ impl RawDeltaTable {
         commit_properties: Option<PyCommitProperties>,
     ) -> PyResult<PyMergeBuilder> {
         py.allow_threads(|| {
-            let handler: Option<Arc<dyn PreExecuteHandler>> =
+            let handler: Option<Arc<dyn CustomExecuteHandler>> =
                 if self.log_store()?.name() == "LakeFSLogStore" {
-                    Some(Arc::new(LakeFSPreExecuteHandler {}))
+                    Some(Arc::new(LakeFSCustomExecuteHandler {}))
                 } else {
                     None
                 };
@@ -983,7 +983,7 @@ impl RawDeltaTable {
         }
 
         if self.log_store()?.name() == "LakeFSLogStore" {
-            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         let (table, metrics) = rt()
@@ -1371,7 +1371,7 @@ impl RawDeltaTable {
             }
 
             if self.log_store()?.name() == "LakeFSLogStore" {
-                cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+                cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
             }
 
             rt().block_on(cmd.into_future())
@@ -1398,7 +1398,7 @@ impl RawDeltaTable {
         }
 
         if self.log_store()?.name() == "LakeFSLogStore" {
-            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         let table = rt()
@@ -1427,7 +1427,7 @@ impl RawDeltaTable {
         }
 
         if self.log_store()?.name() == "LakeFSLogStore" {
-            cmd = cmd.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            cmd = cmd.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         let (table, metrics) = rt()
@@ -2030,7 +2030,7 @@ fn write_to_deltalake(
         };
 
         if table_uri.starts_with("lakefs://") {
-            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            builder = builder.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         rt().block_on(builder.into_future())
@@ -2097,7 +2097,7 @@ fn create_deltalake(
         };
 
         if use_lakefs_handler {
-            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            builder = builder.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         rt().block_on(builder.into_future())
@@ -2131,13 +2131,11 @@ fn write_new_deltalake(
 
         let schema: StructType = (&schema.0).try_into().map_err(PythonError::from)?;
 
-
         let use_lakefs_handler = if table.log_store().name() == "LakeFSLogStore" {
             true
         } else {
             false
         };
-
 
         let mut builder = DeltaOps(table)
             .create()
@@ -2164,7 +2162,7 @@ fn write_new_deltalake(
         };
 
         if use_lakefs_handler {
-            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            builder = builder.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         rt().block_on(builder.into_future())
@@ -2225,7 +2223,7 @@ fn convert_to_deltalake(
         };
 
         if uri.starts_with("lakefs://") {
-            builder = builder.with_pre_execute_handler(Arc::new(LakeFSPreExecuteHandler {}))
+            builder = builder.with_custom_execute_handler(Arc::new(LakeFSCustomExecuteHandler {}))
         }
 
         rt().block_on(builder.into_future())

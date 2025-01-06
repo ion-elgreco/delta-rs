@@ -31,6 +31,7 @@ use futures::future::BoxFuture;
 use object_store::path::Path;
 use object_store::ObjectStore;
 use serde::Serialize;
+use uuid::Uuid;
 
 use crate::kernel::{Action, Add, Protocol, Remove};
 use crate::logstore::LogStoreRef;
@@ -39,7 +40,7 @@ use crate::table::state::DeltaTableState;
 use crate::{DeltaResult, DeltaTable, DeltaTableConfig, DeltaTableError, ObjectStoreError};
 
 use super::transaction::{CommitBuilder, CommitProperties, TransactionError};
-use super::{Operation, PreExecuteHandler};
+use super::{CustomExecuteHandler, Operation};
 
 /// Errors that can occur during restore
 #[derive(thiserror::Error, Debug)]
@@ -89,15 +90,15 @@ pub struct RestoreBuilder {
     protocol_downgrade_allowed: bool,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 impl super::Operation<()> for RestoreBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -112,7 +113,7 @@ impl RestoreBuilder {
             ignore_missing_files: false,
             protocol_downgrade_allowed: false,
             commit_properties: CommitProperties::default(),
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -147,9 +148,9 @@ impl RestoreBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 }
@@ -162,6 +163,7 @@ async fn execute(
     ignore_missing_files: bool,
     protocol_downgrade_allowed: bool,
     mut commit_properties: CommitProperties,
+    operation_id: Uuid,
 ) -> DeltaResult<RestoreMetrics> {
     if !(version_to_restore
         .is_none()
@@ -227,7 +229,7 @@ async fn execute(
         .collect();
 
     if !ignore_missing_files {
-        check_files_available(log_store.object_store().as_ref(), &files_to_add).await?;
+        check_files_available(log_store.reading_object_store().as_ref(), &files_to_add).await?;
     }
 
     let metrics = RestoreMetrics {
@@ -291,7 +293,7 @@ async fn execute(
     let commit_version = snapshot.version() + 1;
     let commit_bytes = prepared_commit.commit_or_bytes();
     match log_store
-        .write_commit_entry(commit_version, commit_bytes.clone())
+        .write_commit_entry(commit_version, commit_bytes.clone(), operation_id)
         .await
     {
         Ok(_) => {}
@@ -300,7 +302,7 @@ async fn execute(
         }
         Err(err) => {
             log_store
-                .abort_commit_entry(commit_version, commit_bytes.clone())
+                .abort_commit_entry(commit_version, commit_bytes.clone(), operation_id)
                 .await?;
             return Err(err.into());
         }
@@ -335,7 +337,9 @@ impl std::future::IntoFuture for RestoreBuilder {
         let this = self;
 
         Box::pin(async move {
-            this.pre_execute().await?;
+            let operation_id = this.get_operation_id();
+            this.pre_execute(operation_id).await?;
+
             let metrics = execute(
                 this.log_store.clone(),
                 this.snapshot.clone(),
@@ -343,9 +347,13 @@ impl std::future::IntoFuture for RestoreBuilder {
                 this.datetime_to_restore,
                 this.ignore_missing_files,
                 this.protocol_downgrade_allowed,
-                this.commit_properties,
+                this.commit_properties.clone(),
+                operation_id,
             )
             .await?;
+
+            this.post_execute(operation_id).await?;
+
             let mut table = DeltaTable::new_with_state(this.log_store, this.snapshot);
             table.update().await?;
             Ok((table, metrics))

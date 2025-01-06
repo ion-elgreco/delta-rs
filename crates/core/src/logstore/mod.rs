@@ -16,6 +16,7 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 use url::Url;
+use uuid::Uuid;
 
 use crate::kernel::log_segment::PathExt;
 use crate::kernel::Action;
@@ -233,6 +234,7 @@ pub trait LogStore: Send + Sync + AsAny {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError>;
 
     /// Abort the commit entry for the given version.
@@ -240,6 +242,7 @@ pub trait LogStore: Send + Sync + AsAny {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError>;
 
     /// Find latest version currently stored in the delta log.
@@ -262,7 +265,7 @@ pub trait LogStore: Send + Sync + AsAny {
     }
 
     /// Get object store for writing operations.
-    fn object_store(&self) -> Arc<dyn ObjectStore>;
+    fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore>;
 
     /// Get object store for reading operations.
     fn reading_object_store(&self) -> Arc<dyn ObjectStore>;
@@ -626,7 +629,7 @@ mod tests {
         // delta table (it shouldn't be).
         let payload = PutPayload::from_static(b"test-drivin");
         let _put = store
-            .object_store()
+            .object_store(None)
             .put_opts(
                 &Path::from("_delta_log/_commit_failed.tmp"),
                 payload,
@@ -655,7 +658,7 @@ mod tests {
         // Save a commit to the transaction log
         let payload = PutPayload::from_static(b"test");
         let _put = store
-            .object_store()
+            .object_store(None)
             .put_opts(
                 &Path::from("_delta_log/0.json"),
                 payload,
@@ -685,7 +688,7 @@ mod tests {
         // Save a "checkpoint" file to the transaction log directory
         let payload = PutPayload::from_static(b"test");
         let _put = store
-            .object_store()
+            .object_store(None)
             .put_opts(
                 &Path::from("_delta_log/0.checkpoint.parquet"),
                 payload,

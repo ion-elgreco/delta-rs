@@ -18,6 +18,7 @@ use parquet::file::properties::WriterProperties;
 use regex::Regex;
 use serde_json::Value;
 use tracing::{debug, error};
+use uuid::Uuid;
 
 use super::{time_utils, ProtocolError};
 use crate::kernel::arrow::delta_log_schema_for_table;
@@ -91,6 +92,7 @@ pub async fn create_checkpoint(table: &DeltaTable) -> Result<(), ProtocolError> 
         table.version(),
         table.snapshot().map_err(|_| ProtocolError::NoMetaData)?,
         table.log_store.as_ref(),
+        None,
     )
     .await?;
     Ok(())
@@ -110,6 +112,7 @@ pub async fn cleanup_metadata(table: &DeltaTable) -> Result<usize, ProtocolError
         table.version(),
         table.log_store.as_ref(),
         log_retention_timestamp,
+        None,
     )
     .await
 }
@@ -126,7 +129,7 @@ pub async fn create_checkpoint_from_table_uri_and_cleanup(
         .await
         .map_err(|err| ProtocolError::Generic(err.to_string()))?;
     let snapshot = table.snapshot().map_err(|_| ProtocolError::NoMetaData)?;
-    create_checkpoint_for(version, snapshot, table.log_store.as_ref()).await?;
+    create_checkpoint_for(version, snapshot, table.log_store.as_ref(), None).await?;
 
     let enable_expired_log_cleanup =
         cleanup.unwrap_or_else(|| snapshot.table_config().enable_expired_log_cleanup());
@@ -144,6 +147,7 @@ pub async fn create_checkpoint_for(
     version: i64,
     state: &DeltaTableState,
     log_store: &dyn LogStore,
+    operation_id: Option<Uuid>,
 ) -> Result<(), ProtocolError> {
     if !state.load_config().require_files {
         return Err(ProtocolError::Generic(
@@ -175,7 +179,7 @@ pub async fn create_checkpoint_for(
     let file_name = format!("{version:020}.checkpoint.parquet");
     let checkpoint_path = log_store.log_path().child(file_name);
 
-    let object_store = log_store.object_store();
+    let object_store = log_store.object_store(operation_id);
     debug!("Writing checkpoint to {:?}.", checkpoint_path);
     object_store
         .put(&checkpoint_path, parquet_bytes.into())
@@ -198,6 +202,7 @@ pub async fn cleanup_expired_logs_for(
     until_version: i64,
     log_store: &dyn LogStore,
     cutoff_timestamp: i64,
+    operation_id: Option<Uuid>,
 ) -> Result<usize, ProtocolError> {
     lazy_static! {
         static ref DELTA_LOG_REGEX: Regex =
@@ -220,7 +225,7 @@ pub async fn cleanup_expired_logs_for(
     // Feed a stream of candidate deletion files directly into the delete_stream
     // function to try to improve the speed of cleanup and reduce the need for
     // intermediate memory.
-    let object_store = log_store.object_store();
+    let object_store = log_store.object_store(operation_id);
     let deleted = object_store
         .delete_stream(
             object_store
@@ -590,7 +595,8 @@ mod tests {
         assert_eq!(table.version(), 0);
         assert_eq!(table.get_schema().unwrap(), &table_schema);
         let res =
-            create_checkpoint_for(0, table.snapshot().unwrap(), table.log_store.as_ref()).await;
+            create_checkpoint_for(0, table.snapshot().unwrap(), table.log_store.as_ref(), None)
+                .await;
         assert!(res.is_ok());
 
         // Look at the "files" and verify that the _last_checkpoint has the right version
@@ -659,6 +665,7 @@ mod tests {
             table.version(),
             table.state.as_ref().unwrap(),
             table.log_store.as_ref(),
+            None,
         )
         .await;
         assert!(res.is_ok());
@@ -697,7 +704,9 @@ mod tests {
             .unwrap();
         assert_eq!(table.version(), 0);
         assert_eq!(table.get_schema().unwrap(), &table_schema);
-        match create_checkpoint_for(1, table.snapshot().unwrap(), table.log_store.as_ref()).await {
+        match create_checkpoint_for(1, table.snapshot().unwrap(), table.log_store.as_ref(), None)
+            .await
+        {
             Ok(_) => {
                 /*
                  * If a checkpoint is allowed to be created here, it will use the passed in
@@ -887,6 +896,7 @@ mod tests {
             table.version(),
             table.log_store().as_ref(),
             log_retention_timestamp,
+            None,
         )
         .await
         .unwrap();
@@ -894,7 +904,7 @@ mod tests {
         println!("{:?}", count);
 
         let path = Path::from("_delta_log/00000000000000000000.json");
-        let res = table.log_store().object_store().get(&path).await;
+        let res = table.log_store().object_store(None).get(&path).await;
         assert!(res.is_ok());
     }
 
@@ -915,6 +925,7 @@ mod tests {
             table.version(),
             table.log_store().as_ref(),
             log_retention_timestamp,
+            None,
         )
         .await
         .unwrap();
@@ -923,17 +934,17 @@ mod tests {
         let log_store = table.log_store();
 
         let path = log_store.log_path().child("00000000000000000000.json");
-        let res = table.log_store().object_store().get(&path).await;
+        let res = table.log_store().object_store(None).get(&path).await;
         assert!(res.is_err());
 
         let path = log_store
             .log_path()
             .child("00000000000000000001.checkpoint.parquet");
-        let res = table.log_store().object_store().get(&path).await;
+        let res = table.log_store().object_store(None).get(&path).await;
         assert!(res.is_ok());
 
         let path = log_store.log_path().child("00000000000000000001.json");
-        let res = table.log_store().object_store().get(&path).await;
+        let res = table.log_store().object_store(None).get(&path).await;
         assert!(res.is_ok());
     }
 

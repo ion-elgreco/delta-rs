@@ -48,12 +48,13 @@ use object_store::prefix::PrefixStore;
 use parquet::file::properties::WriterProperties;
 use serde::{Deserialize, Serialize};
 use tracing::log::*;
+use uuid::Uuid;
 
 use super::cdc::should_write_cdc;
 use super::datafusion_utils::Expression;
 use super::transaction::{CommitBuilder, CommitProperties, TableReference, PROTOCOL};
 use super::writer::{DeltaWriter, WriterConfig};
-use super::{CreateBuilder, Operation, PreExecuteHandler};
+use super::{CreateBuilder, CustomExecuteHandler, Operation};
 use crate::delta_datafusion::expr::fmt_expr_to_sql;
 use crate::delta_datafusion::expr::parse_predicate_expression;
 use crate::delta_datafusion::{
@@ -163,7 +164,7 @@ pub struct WriteBuilder {
     description: Option<String>,
     /// Configurations of the delta table, only used when table doesn't exist
     configuration: HashMap<String, Option<String>>,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -185,8 +186,8 @@ impl super::Operation<()> for WriteBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -211,7 +212,7 @@ impl WriteBuilder {
             name: None,
             description: None,
             configuration: Default::default(),
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -305,9 +306,9 @@ impl WriteBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 
@@ -391,7 +392,7 @@ impl WriteBuilder {
                     builder = builder.with_comment(desc.clone());
                 };
 
-                let (_, actions, _) = builder.into_table_and_actions().await?;
+                let (_, actions, _, _) = builder.into_table_and_actions().await?;
                 Ok(actions)
             }
         }
@@ -597,6 +598,7 @@ async fn execute_non_empty_expr(
     writer_stats_config: WriterStatsConfig,
     partition_scan: bool,
     insert_plan: Arc<dyn ExecutionPlan>,
+    operation_id: Uuid,
 ) -> DeltaResult<Vec<Action>> {
     // For each identified file perform a parquet scan + filter + limit (1) + count.
     // If returned count is not zero then append the file to be rewritten and removed from the log. Otherwise do nothing to the file.
@@ -634,7 +636,7 @@ async fn execute_non_empty_expr(
             state.clone(),
             filter,
             partition_columns.clone(),
-            log_store.object_store(),
+            log_store.object_store(Some(operation_id)),
             Some(snapshot.table_config().target_file_size() as usize),
             None,
             writer_properties.clone(),
@@ -662,6 +664,7 @@ async fn execute_non_empty_expr(
             writer_properties,
             writer_stats_config,
             insert_plan,
+            operation_id,
         )
         .await?
         {
@@ -684,6 +687,7 @@ pub(crate) async fn execute_non_empty_expr_cdc(
     writer_properties: Option<WriterProperties>,
     writer_stats_config: WriterStatsConfig,
     insert_plan: Arc<dyn ExecutionPlan>,
+    operation_id: Uuid,
 ) -> DeltaResult<Option<Vec<Action>>> {
     match should_write_cdc(snapshot) {
         // Create CDC scan
@@ -742,7 +746,7 @@ pub(crate) async fn execute_non_empty_expr_cdc(
                 state.clone(),
                 cdc_plan.clone(),
                 table_partition_cols.clone(),
-                log_store.object_store(),
+                log_store.object_store(Some(operation_id)),
                 Some(snapshot.table_config().target_file_size() as usize),
                 None,
                 writer_properties,
@@ -768,6 +772,7 @@ async fn prepare_predicate_actions(
     deletion_timestamp: i64,
     writer_stats_config: WriterStatsConfig,
     insert_plan: Arc<dyn ExecutionPlan>,
+    operation_id: Uuid,
 ) -> DeltaResult<Vec<Action>> {
     let candidates =
         find_files(snapshot, log_store.clone(), &state, Some(predicate.clone())).await?;
@@ -783,6 +788,7 @@ async fn prepare_predicate_actions(
         writer_stats_config,
         candidates.partition_scan,
         insert_plan,
+        operation_id,
     )
     .await?;
 
@@ -814,7 +820,8 @@ impl std::future::IntoFuture for WriteBuilder {
 
         Box::pin(async move {
             // Runs pre execution handler.
-            this.pre_execute().await?;
+            let operation_id = this.get_operation_id();
+            this.pre_execute(operation_id).await?;
 
             let mut metrics = WriteMetrics::default();
             let exec_start = Instant::now();
@@ -1050,7 +1057,7 @@ impl std::future::IntoFuture for WriteBuilder {
                 state.clone(),
                 plan.clone(),
                 partition_columns.clone(),
-                this.log_store.object_store().clone(),
+                this.log_store.object_store(Some(operation_id)).clone(),
                 target_file_size,
                 this.write_batch_size,
                 this.writer_properties.clone(),
@@ -1119,6 +1126,7 @@ impl std::future::IntoFuture for WriteBuilder {
                                 deletion_timestamp,
                                 writer_stats_config,
                                 plan,
+                                operation_id,
                             )
                             .await?;
                             if !predicate_actions.is_empty() {
@@ -1161,12 +1169,18 @@ impl std::future::IntoFuture for WriteBuilder {
 
             let commit = CommitBuilder::from(commit_properties)
                 .with_actions(actions)
+                .with_post_commit_hook_handler(this.custom_execute_handler.clone())
+                .with_operation_id(operation_id)
                 .build(
                     this.snapshot.as_ref().map(|f| f as &dyn TableReference),
                     this.log_store.clone(),
                     operation.clone(),
                 )
                 .await?;
+
+            if let Some(handler) = this.custom_execute_handler {
+                handler.post_execute(&this.log_store, operation_id).await?;
+            }
 
             Ok(DeltaTable::new_with_state(this.log_store, commit.snapshot))
         })

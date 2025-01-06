@@ -12,6 +12,7 @@ use deltalake_core::{
 };
 use object_store::{Error as ObjectStoreError, ObjectStore};
 use url::Url;
+use uuid::Uuid;
 
 /// Return the [S3LogStore] implementation with the provided configuration options
 pub fn default_s3_logstore(
@@ -63,7 +64,7 @@ impl LogStore for S3LogStore {
     }
 
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>> {
-        read_commit_entry(self.object_store().as_ref(), version).await
+        read_commit_entry(self.object_store(None).as_ref(), version).await
     }
 
     /// Tries to commit a prepared commit file. Returns [`TransactionError`]
@@ -75,10 +76,14 @@ impl LogStore for S3LogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         match commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
-                Ok(write_commit_entry(self.object_store().as_ref(), version, &tmp_commit).await?)
+                Ok(
+                    write_commit_entry(self.object_store(None).as_ref(), version, &tmp_commit)
+                        .await?,
+                )
             }
             _ => unreachable!(), // S3 Log Store should never receive bytes
         }
@@ -97,10 +102,11 @@ impl LogStore for S3LogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         match &commit_or_bytes {
             CommitOrBytes::TmpCommit(tmp_commit) => {
-                abort_commit_entry(self.object_store().as_ref(), version, tmp_commit).await
+                abort_commit_entry(self.object_store(None).as_ref(), version, tmp_commit).await
             }
             _ => unreachable!(), // S3 Log Store should never receive bytes
         }
@@ -114,12 +120,12 @@ impl LogStore for S3LogStore {
         get_earliest_version(self, current_version).await
     }
 
-    fn object_store(&self) -> Arc<dyn ObjectStore> {
+    fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
         self.storage.get_store(&self.config.location).unwrap()
     }
 
     fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
-        self.object_store()
+        self.object_store(None)
     }
 
     fn config(&self) -> &LogStoreConfig {

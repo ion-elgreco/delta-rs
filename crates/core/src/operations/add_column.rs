@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 use itertools::Itertools;
 
 use super::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
-use super::{Operation, PreExecuteHandler};
+use super::{CustomExecuteHandler, Operation};
 use crate::kernel::StructField;
 use crate::logstore::LogStoreRef;
 use crate::operations::cast::merge_schema::merge_delta_struct;
@@ -25,15 +25,15 @@ pub struct AddColumnBuilder {
     log_store: LogStoreRef,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 impl super::Operation<()> for AddColumnBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -45,7 +45,7 @@ impl AddColumnBuilder {
             log_store,
             fields: None,
             commit_properties: CommitProperties::default(),
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -60,9 +60,9 @@ impl AddColumnBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 }
@@ -81,8 +81,8 @@ impl std::future::IntoFuture for AddColumnBuilder {
                 Some(v) => v,
                 None => return Err(DeltaTableError::Generic("No fields provided".to_string())),
             };
-
-            this.pre_execute().await?;
+            let operation_id = this.get_operation_id();
+            this.pre_execute(operation_id).await?;
 
             let fields_right = &StructType::new(fields.clone());
             let table_schema = this.snapshot.schema();
@@ -119,10 +119,14 @@ impl std::future::IntoFuture for AddColumnBuilder {
                 actions.push(new_protocol.into())
             }
 
-            let commit = CommitBuilder::from(this.commit_properties)
+            let commit = CommitBuilder::from(this.commit_properties.clone())
                 .with_actions(actions)
+                .with_operation_id(operation_id)
+                .with_post_commit_hook_handler(this.get_custom_execute_handler().cloned())
                 .build(Some(&this.snapshot), this.log_store.clone(), operation)
                 .await?;
+
+            this.post_execute(operation_id).await?;
 
             Ok(DeltaTable::new_with_state(
                 this.log_store,

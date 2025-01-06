@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use add_feature::AddTableFeatureBuilder;
 #[cfg(feature = "datafusion")]
@@ -66,8 +67,28 @@ pub mod write;
 pub mod writer;
 
 #[async_trait]
-pub trait PreExecuteHandler: Send + Sync {
-    async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()>;
+pub trait CustomExecuteHandler: Send + Sync {
+    // Execute arbitrary code at the start of a delta operation
+    async fn pre_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()>;
+
+    // Execute arbitrary code at the end of a delta operation
+    async fn post_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()>;
+
+    // Execute arbitrary code at the start of the post commit hook
+    async fn before_post_commit_hook(
+        &self,
+        log_store: &LogStoreRef,
+        file_operation: bool,
+        operation_id: Uuid,
+    ) -> DeltaResult<()>;
+
+    // Execute arbitrary code at the end of the post commit hook
+    async fn after_post_commit_hook(
+        &self,
+        log_store: &LogStoreRef,
+        file_operation: bool,
+        operation_id: Uuid,
+    ) -> DeltaResult<()>;
 }
 
 #[allow(unused)]
@@ -75,13 +96,29 @@ pub trait PreExecuteHandler: Send + Sync {
 /// should have consistent
 pub(crate) trait Operation<State>: std::future::IntoFuture {
     fn get_log_store(&self) -> &LogStoreRef;
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>>;
-    async fn pre_execute(&self) -> DeltaResult<()> {
-        if let Some(handler) = self.get_pre_execute_handler() {
-            handler.execute(self.get_log_store()).await
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>>;
+    async fn pre_execute(&self, operation_id: Uuid) -> DeltaResult<()> {
+        if let Some(handler) = self.get_custom_execute_handler() {
+            handler
+                .pre_execute(self.get_log_store(), operation_id)
+                .await
         } else {
             Ok(())
         }
+    }
+
+    async fn post_execute(&self, operation_id: Uuid) -> DeltaResult<()> {
+        if let Some(handler) = self.get_custom_execute_handler() {
+            handler
+                .post_execute(self.get_log_store(), operation_id)
+                .await
+        } else {
+            Ok(())
+        }
+    }
+
+    fn get_operation_id(&self) -> uuid::Uuid {
+        Uuid::new_v4()
     }
 }
 
@@ -334,7 +371,7 @@ mod datafusion_utils {
     use crate::{delta_datafusion::expr::parse_predicate_expression, DeltaResult};
 
     /// Used to represent user input of either a Datafusion expression or string expression
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     pub enum Expression {
         /// Datafusion Expression
         DataFusion(Expr),

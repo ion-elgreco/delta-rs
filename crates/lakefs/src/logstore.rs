@@ -7,7 +7,7 @@ use crate::client::LakeFSConfig;
 use super::client::LakeFSClient;
 use async_trait::async_trait;
 use bytes::Bytes;
-use deltalake_core::operations::PreExecuteHandler;
+use deltalake_core::operations::CustomExecuteHandler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
@@ -19,7 +19,9 @@ use deltalake_core::{
     DeltaResult,
 };
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
+use tracing::debug;
 use url::Url;
+use uuid::Uuid;
 
 /// Return the [LakeFSLogStore] implementation with the provided configuration options
 pub fn lakefs_logstore(
@@ -84,16 +86,102 @@ impl LakeFSLogStore {
             client,
         }
     }
-    fn get_transaction_objectstore(&self) -> DeltaResult<(String, ObjectStoreRef)> {
+    fn get_transaction_objectstore(
+        &self,
+        operation_id: Uuid,
+    ) -> DeltaResult<(String, ObjectStoreRef)> {
         let (repo, _, table) = self.client.decompose_url(self.config.location.to_string());
         let string_url = format!(
             "lakefs://{}/{}/{}",
             repo,
-            self.client.get_transaction(),
+            self.client.get_transaction(operation_id),
             table
         );
         let transaction_url = Url::parse(&string_url).unwrap();
         Ok((string_url, self.storage.get_store(&transaction_url)?))
+    }
+
+    pub async fn pre_execute(&self, operation_id: Uuid) -> DeltaResult<()> {
+        // Create LakeFS Branch for transaction
+        let (lakefs_url, tnx_branch) = self
+            .client
+            .create_branch(&self.config.location, operation_id)
+            .await?;
+
+        // Build new object store store using the new lakefs url
+        let txn_store = url_prefix_handler(
+            Arc::new(DeltaIOStorageBackend::new(
+                self.build_new_store(&lakefs_url)?,
+                IORuntime::default().get_handle(),
+            )) as ObjectStoreRef,
+            Path::parse(lakefs_url.path())?,
+        );
+
+        // Register transaction branch as ObjectStore in log_store storages
+        self.register_object_store(&lakefs_url, txn_store);
+
+        // set transaction in client for easy retrieval
+        self.client.set_transaction(operation_id, tnx_branch)?;
+        Ok(())
+    }
+
+    pub async fn commit_merge(&self, operation_id: Uuid) -> DeltaResult<()> {
+        let (transaction_url, _) = self
+            .get_transaction_objectstore(operation_id)
+            .map_err(|e| TransactionError::LogStoreError {
+                msg: e.to_string(),
+                source: Box::new(e),
+            })?;
+
+        // Do LakeFS Commit
+        let (repo, transaction_branch, table) = self.client.decompose_url(transaction_url);
+        self.client
+            .commit(
+                repo,
+                transaction_branch,
+                format!("Delta file operations {{ table: {}}}", table),
+                true, // Needs to be true, it could be a file operation but no logs were deleted.
+            )
+            .await
+            .map_err(|e| TransactionError::LogStoreError {
+                msg: e.to_string(),
+                source: Box::new(e),
+            })?;
+
+        // Try LakeFS Branch merge of transaction branch in source branch
+        let (repo, target_branch, table) =
+            self.client.decompose_url(self.config.location.to_string());
+        match self
+            .client
+            .merge(
+                repo,
+                target_branch,
+                self.client.get_transaction(operation_id),
+                0,
+                format!("Finished delta file operations {{ table: {}}}", table),
+                true, // Needs to be true, it could be a file operation but no logs were deleted.
+            )
+            .await
+        {
+            Ok(_) => {
+                let (repo, _, _) = self.client.decompose_url(self.config.location.to_string());
+                self.client
+                    .delete_branch(repo, self.client.get_transaction(operation_id))
+                    .await?;
+                Ok(())
+            }
+            // TODO: propagate better LakeFS errors.
+            Err(TransactionError::VersionAlreadyExists(_)) => {
+                Err(TransactionError::LogStoreError {
+                    msg: "Merge Failed".to_string(),
+                    source: Box::new(DeltaTableError::generic("Merge Failed")),
+                })
+            }
+            Err(err) => Err(err),
+        }?;
+
+        self.client.clear_transaction(operation_id);
+        Ok(())
     }
 }
 
@@ -120,9 +208,10 @@ impl LogStore for LakeFSLogStore {
         &self,
         version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
-        let (url, store) =
-            self.get_transaction_objectstore()
+        let (transaction_url, store) =
+            self.get_transaction_objectstore(operation_id)
                 .map_err(|e| TransactionError::LogStoreError {
                     msg: e.to_string(),
                     source: Box::new(e),
@@ -130,6 +219,7 @@ impl LogStore for LakeFSLogStore {
 
         match commit_or_bytes {
             CommitOrBytes::LogBytes(log_bytes) => {
+                // Put commit
                 store
                     .put_opts(
                         &commit_uri_from_version(version),
@@ -145,30 +235,41 @@ impl LogStore for LakeFSLogStore {
                             _ => TransactionError::from(err),
                         }
                     })?;
+
+                // Do LakeFS Commit
+                let (repo, transaction_branch, table) = self.client.decompose_url(transaction_url);
                 self.client
-                    .commit(url.clone(), version)
+                    .commit(
+                        repo,
+                        transaction_branch,
+                        format!("Delta commit {{ table: {}, version: {}}}", table, version),
+                        false,
+                    )
                     .await
                     .map_err(|e| TransactionError::LogStoreError {
                         msg: e.to_string(),
                         source: Box::new(e),
                     })?;
+
+                // Try LakeFS Branch merge of transaction branch in source branch
+                let (repo, target_branch, table) =
+                    self.client.decompose_url(self.config.location.to_string());
                 match self
                     .client
                     .merge(
-                        &self.config().location,
-                        self.client.get_transaction(),
+                        repo,
+                        target_branch,
+                        self.client.get_transaction(operation_id),
                         version,
+                        format!(
+                            "Finished deltalake transaction {{ table: {}, version: {} }}",
+                            table, version
+                        ),
+                        false,
                     )
                     .await
                 {
-                    Ok(_) => {
-                        let (repo, _, _) =
-                            self.client.decompose_url(self.config.location.to_string());
-                        self.client
-                            .delete_branch(repo, self.client.get_transaction())
-                            .await?;
-                        Ok(())
-                    }
+                    Ok(_) => Ok(()),
                     Err(TransactionError::VersionAlreadyExists(version)) => {
                         store
                             .delete(&commit_uri_from_version(version))
@@ -178,7 +279,6 @@ impl LogStore for LakeFSLogStore {
                     }
                     Err(err) => Err(err),
                 }?;
-                self.client.clear_transaction();
             }
             _ => unreachable!(), // Default log store should never get a tmp_commit, since this is for conditional put stores
         };
@@ -189,14 +289,15 @@ impl LogStore for LakeFSLogStore {
         &self,
         _version: i64,
         commit_or_bytes: CommitOrBytes,
+        operation_id: Uuid,
     ) -> Result<(), TransactionError> {
         match &commit_or_bytes {
             CommitOrBytes::LogBytes(_) => {
                 let (repo, _, _) = self.client.decompose_url(self.config.location.to_string());
                 self.client
-                    .delete_branch(repo, self.client.get_transaction())
+                    .delete_branch(repo, self.client.get_transaction(operation_id))
                     .await?;
-                self.client.clear_transaction();
+                self.client.clear_transaction(operation_id);
                 Ok(())
             }
             _ => unreachable!(), // Default log store should never get a tmp_commit, since this is for conditional put stores
@@ -215,11 +316,16 @@ impl LogStore for LakeFSLogStore {
         self.storage.get_store(&self.config.location).unwrap()
     }
 
-    fn object_store(&self) -> Arc<dyn ObjectStore> {
-        let (_, store) = self.get_transaction_objectstore().expect(
-            "The object_store registry inside LakeFSLogstore contain the Transaction store. Something went wrong."
-        );
-        store
+    fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
+        match operation_id {
+            Some(id) => {
+                let (_, store) = self.get_transaction_objectstore(id).expect(
+                    &format!("The object_store registry inside LakeFSLogstore didn't have a store for operation_id {} Something went wrong.", id)
+                );
+                store
+            }
+            _ => self.reading_object_store(),
+        }
     }
 
     fn config(&self) -> &LogStoreConfig {
@@ -236,33 +342,83 @@ fn put_options() -> &'static PutOptions {
     })
 }
 
-pub struct LakeFSPreExecuteHandler {}
+pub struct LakeFSCustomExecuteHandler {}
 
 #[async_trait]
-impl PreExecuteHandler for LakeFSPreExecuteHandler {
-    async fn execute(&self, log_store: &LogStoreRef) -> DeltaResult<()> {
+impl CustomExecuteHandler for LakeFSCustomExecuteHandler {
+    // LakeFS Log store pre execution of delta operation (create branch, logs object store and transaction)
+    async fn pre_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()> {
+        debug!("Running LakeFS pre execution inside delta operation");
         if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
-            let (lakefs_url, tnx_branch) = lakefs_store
-                .client
-                .create_branch(&lakefs_store.config.location)
-                .await?;
-
-            lakefs_store.client.set_transaction(tnx_branch)?;
-
-            let txn_store = url_prefix_handler(
-                Arc::new(DeltaIOStorageBackend::new(
-                    lakefs_store.build_new_store(&lakefs_url)?,
-                    IORuntime::default().get_handle(),
-                )) as ObjectStoreRef,
-                Path::parse(lakefs_url.path())?,
-            );
-
-            lakefs_store.register_object_store(&lakefs_url, txn_store);
-            Ok(())
+            lakefs_store.pre_execute(operation_id).await
         } else {
             Err(DeltaTableError::generic(
                 "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
             ))
         }
+    }
+    // Not required for LakeFS
+    async fn post_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()> {
+        debug!("Running LakeFS post execution inside delta operation");
+        if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
+            let (repo, _, _) = lakefs_store
+                .client
+                .decompose_url(lakefs_store.config.location.to_string());
+            let result = lakefs_store
+                .client
+                .delete_branch(repo, lakefs_store.client.get_transaction(operation_id))
+                .await
+                .map_err(|e| DeltaTableError::Transaction { source: e });
+            lakefs_store.client.clear_transaction(operation_id);
+            result
+        } else {
+            Err(DeltaTableError::generic(
+                "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
+            ))
+        }
+    }
+
+    // Execute arbitrary code at the start of the post commit hook
+    async fn before_post_commit_hook(
+        &self,
+        log_store: &LogStoreRef,
+        file_operations: bool,
+        operation_id: Uuid,
+    ) -> DeltaResult<()> {
+        // don't need this anymore perhaps
+
+        if file_operations {
+            debug!("Running LakeFS pre execution inside post_commit_hook");
+            if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>()
+            {
+                lakefs_store.pre_execute(operation_id).await
+            } else {
+                Err(DeltaTableError::generic(
+                    "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
+                ))
+            }?;
+        }
+        Ok(())
+    }
+
+    // Execute arbitrary code at the end of the post commit hook
+    async fn after_post_commit_hook(
+        &self,
+        log_store: &LogStoreRef,
+        file_operations: bool,
+        operation_id: Uuid,
+    ) -> DeltaResult<()> {
+        if file_operations {
+            debug!("Running LakeFS post execution inside post_commit_hook");
+            if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>()
+            {
+                lakefs_store.commit_merge(operation_id).await
+            } else {
+                Err(DeltaTableError::generic(
+                    "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
+                ))
+            }?;
+        }
+        Ok(())
     }
 }

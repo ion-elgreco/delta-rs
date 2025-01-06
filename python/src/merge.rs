@@ -7,7 +7,7 @@ use deltalake::datafusion::datasource::MemTable;
 use deltalake::datafusion::prelude::SessionContext;
 use deltalake::logstore::LogStoreRef;
 use deltalake::operations::merge::MergeBuilder;
-use deltalake::operations::PreExecuteHandler;
+use deltalake::operations::CustomExecuteHandler;
 use deltalake::table::state::DeltaTableState;
 use deltalake::{DeltaResult, DeltaTable};
 use pyo3::prelude::*;
@@ -45,7 +45,7 @@ impl PyMergeBuilder {
         writer_properties: Option<PyWriterProperties>,
         post_commithook_properties: Option<PyPostCommitHookProperties>,
         commit_properties: Option<PyCommitProperties>,
-        pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+        custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
     ) -> DeltaResult<Self> {
         let ctx = SessionContext::new();
         let schema = source.schema();
@@ -75,8 +75,8 @@ impl PyMergeBuilder {
             cmd = cmd.with_commit_properties(commit_properties);
         }
 
-        if let Some(handler) = pre_execute_handler {
-            cmd = cmd.with_pre_execute_handler(handler);
+        if let Some(handler) = custom_execute_handler {
+            cmd = cmd.with_custom_execute_handler(handler);
         }
 
         Ok(Self {

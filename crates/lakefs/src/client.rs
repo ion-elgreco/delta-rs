@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use dashmap::DashMap;
 use deltalake_core::operations::transaction::TransactionError;
 use deltalake_core::{DeltaResult, DeltaTableError};
 use reqwest::Client;
@@ -27,13 +28,14 @@ impl LakeFSConfig {
     }
 }
 
-// Slim LakeFS client for lakefs branch operations.
+/// Slim LakeFS client for lakefs branch operations.
 #[derive(Debug, Clone)]
 pub struct LakeFSClient {
-    /// configuration of the
+    /// configuration of the lakefs client
     config: LakeFSConfig,
     http_client: Client,
-    transaction: Arc<Mutex<TransactionId>>,
+    /// Holds the running delta lake operations, each operation propogates the operation ID into execution handler.
+    transactions: DashMap<Uuid, String>,
 }
 
 impl LakeFSClient {
@@ -42,21 +44,25 @@ impl LakeFSClient {
         Self {
             config,
             http_client,
-            transaction: Arc::new(Mutex::new(TransactionId::default())),
+            transactions: DashMap::new(),
         }
     }
 
-    pub async fn create_branch(&self, source_url: &Url) -> DeltaResult<(Url, String)> {
+    pub async fn create_branch(
+        &self,
+        source_url: &Url,
+        operation_id: Uuid,
+    ) -> DeltaResult<(Url, String)> {
         let (repo, source_branch, table) = self.decompose_url(source_url.to_string());
 
         let request_url = format!("{}/api/v1/repositories/{}/branches", self.config.host, repo);
 
-        let transaction_branch = format!("tx-{}", Uuid::new_v4());
+        let transaction_branch = format!("delta-tx-{}", operation_id);
         let body = json!({
             "name": transaction_branch,
             "source": source_branch,
             "force": false,
-            "hidden": false, // Set to true later
+            "hidden": false,
         });
 
         let response = self
@@ -157,19 +163,27 @@ impl LakeFSClient {
         }
     }
 
-    pub async fn commit(&self, url: String, commit_version: i64) -> DeltaResult<()> {
-        let (repo, branch, table) = self.decompose_url(url);
-
+    pub async fn commit(
+        &self,
+        repo: String,
+        branch: String,
+        commit_message: String,
+        allow_empty: bool,
+    ) -> DeltaResult<()> {
         let request_url = format!(
             "{}/api/v1/repositories/{}/branches/{}/commits",
             self.config.host, repo, branch
         );
 
         let body = json!({
-            "message": format!("deltalake commit {{ table: {}, version: {}}}", table, commit_version),
+            "message": commit_message,
+            "allow_empty": allow_empty,
         });
 
-        debug!("Committing to LakeFS Branch: {}.", branch);
+        debug!(
+            "Committing to LakeFS Branch: '{}' in repo: '{}'",
+            branch, repo
+        );
         let response = self
             .http_client
             .post(&request_url)
@@ -205,24 +219,26 @@ impl LakeFSClient {
 
     pub async fn merge(
         &self,
-        target: &Url,
+        repo: String,
+        target_branch: String,
         transaction_branch: String,
         commit_version: i64,
+        commit_message: String,
+        allow_empty: bool,
     ) -> Result<(), TransactionError> {
-        let (repo, target, table) = self.decompose_url(target.to_string());
-
         let request_url = format!(
             "{}/api/v1/repositories/{}/refs/{}/merge/{}",
-            self.config.host, repo, transaction_branch, target
+            self.config.host, repo, transaction_branch, target_branch
         );
 
         let body = json!({
-            "message": format!("Finished deltalake transaction {{ table: {}, version: {} }}", table, commit_version),
+            "message": commit_message,
+            "allow_empty": allow_empty,
         });
 
         debug!(
-            "Merging LakeFS, source `{}` into target `{}`",
-            transaction_branch, transaction_branch
+            "Merging LakeFS, source `{}` into target `{}` in repo: {}",
+            transaction_branch, transaction_branch, repo
         );
         let response = self
             .http_client
@@ -272,18 +288,34 @@ impl LakeFSClient {
         };
     }
 
-    pub fn set_transaction(&self, id: String) -> DeltaResult<()> {
-        self.transaction.lock().unwrap().insert(id.clone())?;
+    pub fn set_transaction(&self, id: Uuid, branch: String) -> DeltaResult<()> {
+        self.transactions.insert(id, branch);
         debug!("{}", format!("LakeFS Transaction `{}` has been set.", id));
         Ok(())
     }
 
-    pub fn get_transaction(&self) -> String {
-        self.transaction.lock().unwrap().get().clone().unwrap()
+    pub fn get_transaction(&self, id: Uuid) -> String {
+        let transaction_branch = self
+            .transactions
+            .get(&id)
+            .expect(&format!(
+                "Tried getting transaction {}, but transaction not found. Something went wrong.",
+                id
+            ))
+            .to_string();
+        debug!(
+            "{}",
+            format!("LakeFS Transaction `{}` has been grabbed.", id)
+        );
+        transaction_branch
     }
 
-    pub fn clear_transaction(&self) {
-        self.transaction.lock().unwrap().clear();
+    pub fn clear_transaction(&self, id: Uuid) {
+        self.transactions.remove(&id);
+        debug!(
+            "{}",
+            format!("LakeFS Transaction `{}` has been removed.", id)
+        );
     }
 
     pub fn decompose_url(&self, url: String) -> (String, String, String) {
@@ -303,33 +335,4 @@ impl LakeFSClient {
 #[derive(Deserialize, Debug)]
 struct LakeFSErrorResponse {
     message: String,
-}
-
-#[derive(Default, Debug, Clone)]
-struct TransactionId {
-    value: Option<String>,
-}
-
-impl TransactionId {
-    fn insert(&mut self, value: String) -> Result<(), TransactionError> {
-        if self.value.is_some() {
-            // Replace with LakeFS errors.
-            return Err(TransactionError::LogStoreError {
-                msg: "Transaction branch ID is already set.".to_string(),
-                source: Box::new(DeltaTableError::generic(
-                    "Transaction branch ID is already set.",
-                )),
-            });
-        }
-        self.value = Some(value);
-        Ok(())
-    }
-
-    fn get(&self) -> &Option<String> {
-        &self.value
-    }
-
-    fn clear(&mut self) {
-        self.value = None;
-    }
 }

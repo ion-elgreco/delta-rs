@@ -43,6 +43,7 @@ use futures::future::BoxFuture;
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use tracing::log::*;
+use uuid::Uuid;
 
 use super::{
     datafusion_utils::Expression,
@@ -51,7 +52,7 @@ use super::{
 use super::{transaction::PROTOCOL, write::WriterStatsConfig};
 use super::{
     write::{write_execution_plan, write_execution_plan_cdc},
-    Operation, PreExecuteHandler,
+    CustomExecuteHandler, Operation,
 };
 use crate::delta_datafusion::{find_files, planner::DeltaPlanner, register_store};
 use crate::kernel::{Action, Remove};
@@ -98,7 +99,7 @@ pub struct UpdateBuilder {
     /// safe_cast determines how data types that do not match the underlying table are handled
     /// By default an error is returned
     safe_cast: bool,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 #[derive(Default, Serialize, Debug)]
@@ -122,8 +123,8 @@ impl super::Operation<()> for UpdateBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -139,7 +140,7 @@ impl UpdateBuilder {
             writer_properties: None,
             commit_properties: CommitProperties::default(),
             safe_cast: false,
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -191,9 +192,9 @@ impl UpdateBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 }
@@ -246,6 +247,8 @@ async fn execute(
     writer_properties: Option<WriterProperties>,
     mut commit_properties: CommitProperties,
     _safe_cast: bool,
+    operation_id: Uuid,
+    handle: Option<&Arc<dyn CustomExecuteHandler>>,
 ) -> DeltaResult<(DeltaTableState, UpdateMetrics)> {
     // Validate the predicate and update expressions.
     //
@@ -391,7 +394,7 @@ async fn execute(
         state.clone(),
         physical_plan.clone(),
         table_partition_cols.clone(),
-        log_store.object_store().clone(),
+        log_store.object_store(Some(operation_id)).clone(),
         Some(snapshot.table_config().target_file_size() as usize),
         None,
         writer_properties.clone(),
@@ -454,7 +457,7 @@ async fn execute(
                     state,
                     df.create_physical_plan().await?,
                     table_partition_cols,
-                    log_store.object_store(),
+                    log_store.object_store(Some(operation_id)),
                     Some(snapshot.table_config().target_file_size() as usize),
                     None,
                     writer_properties,
@@ -472,6 +475,8 @@ async fn execute(
 
     let commit = CommitBuilder::from(commit_properties)
         .with_actions(actions)
+        .with_operation_id(operation_id)
+        .with_post_commit_hook_handler(handle.cloned())
         .build(Some(&snapshot), log_store, operation)
         .await?;
 
@@ -492,7 +497,8 @@ impl std::future::IntoFuture for UpdateBuilder {
                 return Err(DeltaTableError::NotInitializedWithFiles("UPDATE".into()));
             }
 
-            this.pre_execute().await?;
+            let operation_id = this.get_operation_id();
+            this.pre_execute(operation_id).await?;
 
             let state = this.state.unwrap_or_else(|| {
                 let session: SessionContext = DeltaSessionContext::default().into();
@@ -512,8 +518,14 @@ impl std::future::IntoFuture for UpdateBuilder {
                 this.writer_properties,
                 this.commit_properties,
                 this.safe_cast,
+                operation_id,
+                this.custom_execute_handler.as_ref(),
             )
             .await?;
+
+            if let Some(handler) = this.custom_execute_handler {
+                handler.post_execute(&this.log_store, operation_id).await?;
+            }
 
             Ok((
                 DeltaTable::new_with_state(this.log_store, snapshot),

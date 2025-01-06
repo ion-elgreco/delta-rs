@@ -15,6 +15,7 @@ use parquet::errors::ParquetError;
 use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value};
 use tracing::debug;
+use uuid::Uuid;
 
 use crate::operations::get_num_idx_cols_and_stats_columns;
 use crate::{
@@ -28,7 +29,7 @@ use crate::{
     DeltaResult, DeltaTable, DeltaTableError, ObjectStoreError, NULL_PARTITION_VALUE_DATA_PATH,
 };
 
-use super::{Operation, PreExecuteHandler};
+use super::{CustomExecuteHandler, Operation};
 
 /// Error converting a Parquet table to a Delta table
 #[derive(Debug, thiserror::Error)]
@@ -109,7 +110,7 @@ pub struct ConvertToDeltaBuilder {
     comment: Option<String>,
     configuration: HashMap<String, Option<String>>,
     metadata: Option<Map<String, Value>>,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 impl Default for ConvertToDeltaBuilder {
@@ -125,8 +126,8 @@ impl super::Operation<()> for ConvertToDeltaBuilder {
             .as_ref()
             .expect("Log store should be available at this stage.")
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -144,7 +145,7 @@ impl ConvertToDeltaBuilder {
             comment: None,
             configuration: Default::default(),
             metadata: Default::default(),
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -243,14 +244,14 @@ impl ConvertToDeltaBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 
     /// Consume self into CreateBuilder with corresponding add actions, schemas and operation meta
-    async fn into_create_builder(mut self) -> Result<CreateBuilder, Error> {
+    async fn into_create_builder(mut self) -> Result<(CreateBuilder, Uuid), Error> {
         // Use the specified log store. If a log store is not provided, create a new store from the specified path.
         // Return an error if neither log store nor path is provided
         self.log_store = if let Some(log_store) = self.log_store {
@@ -264,7 +265,10 @@ impl ConvertToDeltaBuilder {
         } else {
             return Err(Error::MissingLocation);
         };
-        self.pre_execute().await?;
+
+        let operation_id = self.get_operation_id();
+        self.pre_execute(operation_id).await?;
+
         // Return an error if the location is already a Delta table location
         if self.get_log_store().is_delta_table_location().await? {
             return Err(Error::DeltaTableAlready);
@@ -275,7 +279,7 @@ impl ConvertToDeltaBuilder {
         );
 
         // Get all the parquet files in the location
-        let object_store = self.get_log_store().object_store();
+        let object_store = self.get_log_store().reading_object_store();
         let mut files = Vec::new();
         object_store
             .list(None)
@@ -433,7 +437,7 @@ impl ConvertToDeltaBuilder {
         if let Some(metadata) = self.metadata {
             builder = builder.with_metadata(metadata);
         }
-        Ok(builder)
+        Ok((builder, operation_id))
     }
 }
 
@@ -445,10 +449,18 @@ impl std::future::IntoFuture for ConvertToDeltaBuilder {
         let this = self;
 
         Box::pin(async move {
-            let builder = this
+            let handler = this.custom_execute_handler.clone();
+            let (builder, operation_id) = this
                 .into_create_builder()
                 .await
                 .map_err(DeltaTableError::from)?;
+
+            if let Some(handler) = handler {
+                handler
+                    .post_execute(builder.get_log_store(), operation_id)
+                    .await?;
+            }
+
             let table = builder.await?;
             Ok(table)
         })

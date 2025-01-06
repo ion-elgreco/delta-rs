@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use super::transaction::{CommitBuilder, CommitProperties};
-use super::{Operation, PreExecuteHandler};
+use super::{CustomExecuteHandler, Operation};
 use crate::kernel::Action;
 use crate::logstore::LogStoreRef;
 use crate::protocol::DeltaOperation;
@@ -26,15 +26,15 @@ pub struct SetTablePropertiesBuilder {
     log_store: LogStoreRef,
     /// Additional information to add to the commit
     commit_properties: CommitProperties,
-    pre_execute_handler: Option<Arc<dyn PreExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 impl super::Operation<()> for SetTablePropertiesBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_pre_execute_handler(&self) -> Option<&Arc<dyn PreExecuteHandler>> {
-        self.pre_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.as_ref()
     }
 }
 
@@ -47,7 +47,7 @@ impl SetTablePropertiesBuilder {
             snapshot,
             log_store,
             commit_properties: CommitProperties::default(),
-            pre_execute_handler: None,
+            custom_execute_handler: None,
         }
     }
 
@@ -69,9 +69,9 @@ impl SetTablePropertiesBuilder {
         self
     }
 
-    /// Set a custom pre-execute handler.
-    pub fn with_pre_execute_handler(mut self, handler: Arc<dyn PreExecuteHandler>) -> Self {
-        self.pre_execute_handler = Some(handler);
+    /// Set a custom execute handler, for pre and post execution
+    pub fn with_custom_execute_handler(mut self, handler: Arc<dyn CustomExecuteHandler>) -> Self {
+        self.custom_execute_handler = Some(handler);
         self
     }
 }
@@ -85,7 +85,9 @@ impl std::future::IntoFuture for SetTablePropertiesBuilder {
         let this = self;
 
         Box::pin(async move {
-            this.pre_execute().await?;
+            let operation_id = this.get_operation_id();
+            this.pre_execute(operation_id).await?;
+
             let mut metadata = this.snapshot.metadata().clone();
 
             let current_protocol = this.snapshot.protocol();
@@ -114,14 +116,20 @@ impl std::future::IntoFuture for SetTablePropertiesBuilder {
                 actions.push(Action::Protocol(final_protocol));
             }
 
-            let commit = CommitBuilder::from(this.commit_properties)
+            let commit = CommitBuilder::from(this.commit_properties.clone())
                 .with_actions(actions.clone())
+                .with_operation_id(operation_id)
+                .with_post_commit_hook_handler(this.custom_execute_handler.clone())
                 .build(
                     Some(&this.snapshot),
                     this.log_store.clone(),
                     operation.clone(),
                 )
                 .await?;
+
+            if let Some(handler) = this.custom_execute_handler {
+                handler.post_execute(&this.log_store, operation_id).await?;
+            }
             Ok(DeltaTable::new_with_state(
                 this.log_store,
                 commit.snapshot(),

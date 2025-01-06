@@ -279,7 +279,7 @@ impl DeltaTable {
 
     /// get a shared reference to the delta object store
     pub fn object_store(&self) -> ObjectStoreRef {
-        self.log_store.object_store()
+        self.log_store.object_store(None)
     }
 
     /// get a shared reference of the reading delta object store
@@ -399,7 +399,7 @@ impl DeltaTable {
             .snapshot()?
             .snapshot
             .snapshot()
-            .commit_infos(self.object_store(), limit)
+            .commit_infos(self.reading_object_store(), limit)
             .await?
             .try_collect::<Vec<_>>()
             .await?;
