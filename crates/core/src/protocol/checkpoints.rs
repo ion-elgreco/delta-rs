@@ -87,7 +87,10 @@ impl From<Utf8Error> for ProtocolError {
 pub const CHECKPOINT_RECORD_BATCH_SIZE: usize = 5000;
 
 /// Creates checkpoint at current table version
-pub async fn create_checkpoint(table: &DeltaTable, operation_id: Option<Uuid>) -> Result<(), ProtocolError> {
+pub async fn create_checkpoint(
+    table: &DeltaTable,
+    operation_id: Option<Uuid>,
+) -> Result<(), ProtocolError> {
     create_checkpoint_for(
         table.version(),
         table.snapshot().map_err(|_| ProtocolError::NoMetaData)?,
@@ -100,7 +103,10 @@ pub async fn create_checkpoint(table: &DeltaTable, operation_id: Option<Uuid>) -
 
 /// Delete expires log files before given version from table. The table log retention is based on
 /// the `logRetentionDuration` property of the Delta Table, 30 days by default.
-pub async fn cleanup_metadata(table: &DeltaTable, operation_id: Option<Uuid>) -> Result<usize, ProtocolError> {
+pub async fn cleanup_metadata(
+    table: &DeltaTable,
+    operation_id: Option<Uuid>,
+) -> Result<usize, ProtocolError> {
     let log_retention_timestamp = Utc::now().timestamp_millis()
         - table
             .snapshot()
