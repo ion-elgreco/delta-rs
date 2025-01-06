@@ -113,7 +113,7 @@ async fn test_create_s3_table() -> TestResult<()> {
 
     let payload = PutPayload::from_static(b"test-drivin");
     let _put = log_store
-        .object_store()
+        .object_store(None)
         .put_opts(
             &Path::from("_delta_log/_commit_failed.tmp"),
             payload,
@@ -186,7 +186,7 @@ async fn test_repair_commit_entry() -> TestResult<()> {
     // create another incomplete log entry, this time move the temporary file already
     let entry = create_incomplete_commit_entry(&table, 2, "unfinished_commit").await?;
     log_store
-        .object_store()
+        .object_store(None)
         .rename_if_not_exists(&entry.temp_path, &commit_uri_from_version(entry.version))
         .await?;
 
@@ -262,7 +262,7 @@ async fn test_abort_commit_entry() -> TestResult<()> {
     }
     // Temp commit file should have been deleted
     assert!(matches!(
-        log_store.object_store().get(&entry.temp_path).await,
+        log_store.object_store(None).get(&entry.temp_path).await,
         Err(ObjectStoreError::NotFound { .. })
     ));
 
@@ -308,7 +308,11 @@ async fn test_abort_commit_entry_fail_to_delete_entry() -> TestResult<()> {
     ));
 
     // Check temp commit file still exists
-    assert!(log_store.object_store().get(&entry.temp_path).await.is_ok());
+    assert!(log_store
+        .object_store(None)
+        .get(&entry.temp_path)
+        .await
+        .is_ok());
 
     Ok(())
 }

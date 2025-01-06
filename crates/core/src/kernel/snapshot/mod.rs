@@ -847,7 +847,7 @@ mod tests {
         let store = context
             .table_builder(TestTables::Simple)
             .build_storage()?
-            .object_store();
+            .object_store(None);
 
         let snapshot =
             Snapshot::try_new(&Path::default(), store.clone(), Default::default(), None).await?;
@@ -895,7 +895,7 @@ mod tests {
         let store = context
             .table_builder(TestTables::Checkpoints)
             .build_storage()?
-            .object_store();
+            .object_store(None);
 
         for version in 0..=12 {
             let snapshot = Snapshot::try_new(
@@ -920,7 +920,7 @@ mod tests {
         let store = context
             .table_builder(TestTables::Simple)
             .build_storage()?
-            .object_store();
+            .object_store(None);
 
         let snapshot =
             EagerSnapshot::try_new(&Path::default(), store.clone(), Default::default(), None)
@@ -937,7 +937,7 @@ mod tests {
         let store = context
             .table_builder(TestTables::Checkpoints)
             .build_storage()?
-            .object_store();
+            .object_store(None);
 
         for version in 0..=12 {
             let snapshot = EagerSnapshot::try_new(
@@ -962,7 +962,7 @@ mod tests {
         let store = context
             .table_builder(TestTables::Simple)
             .build_storage()?
-            .object_store();
+            .object_store(None);
 
         let mut snapshot =
             EagerSnapshot::try_new(&Path::default(), store.clone(), Default::default(), None)

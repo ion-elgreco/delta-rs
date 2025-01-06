@@ -2708,7 +2708,7 @@ mod tests {
             .unwrap();
 
         let (object_store, mut operations) =
-            RecordingObjectStore::new(table.log_store().object_store());
+            RecordingObjectStore::new(table.log_store().object_store(None));
         let log_store =
             DefaultLogStore::new(Arc::new(object_store), table.log_store().config().clone());
         let provider = DeltaTableProvider::try_new(
