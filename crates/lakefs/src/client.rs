@@ -60,7 +60,7 @@ impl LakeFSClient {
             "name": transaction_branch,
             "source": source_branch,
             "force": false,
-            "hidden": false,
+            "hidden": true,
         });
 
         let response = self
