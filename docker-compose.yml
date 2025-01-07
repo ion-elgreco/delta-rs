@@ -1,5 +1,6 @@
 services:
   lakefs:
+    profiles: ["lakefs"]
     image: treeverse/lakefs:1.47
     ports:
       - "8000:8000"
