@@ -77,12 +77,12 @@ jobs:
         run: make setup-dat
 
       - name: Run tests
-        run: uv run pytest -m '((s3 or azure) and integration) or not integration and not benchmark' --doctest-modules
+        run: uv run --no-sync pytest -m '((s3 or azure) and integration) or not integration and not benchmark' --doctest-modules
 
       - name: Test without pandas
         run: |
           uv pip uninstall pandas
-          uv run pytest -m "not pandas and not integration and not benchmark"
+          uv run --no-sync pytest -m "not pandas and not integration and not benchmark"
           uv pip install pandas
   
   test-lakefs:
@@ -99,7 +99,7 @@ jobs:
         uses: ./.github/actions/setup-env
 
       - name: Start emulated services
-        run: docker compose up -d lakefs
+        run: docker compose -f docker-compose-lakefs.yml up -d
 
       - name: Build and install deltalake
         run: make develop
@@ -108,7 +108,7 @@ jobs:
         run: make setup-dat
 
       - name: Run tests
-        run: uv run pytest -m '(lakefs and integration)' --doctest-modules
+        run: uv run --no-sync pytest -m '(lakefs and integration)' --doctest-modules
 
   test-pyspark:
     name: PySpark Integration Tests
