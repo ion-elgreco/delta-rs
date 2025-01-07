@@ -3,6 +3,7 @@
 use std::sync::{Arc, OnceLock};
 
 use crate::client::LakeFSConfig;
+use crate::errors::LakeFSConfigError;
 
 use super::client::LakeFSClient;
 use async_trait::async_trait;
@@ -32,23 +33,17 @@ pub fn lakefs_logstore(
     let host = options
         .0
         .get("aws_endpoint")
-        .ok_or(DeltaTableError::generic(
-            "LakeFS endpoint is missing in options. Set `endpoint`.",
-        ))?
+        .ok_or(LakeFSConfigError::EndpointMissing)?
         .to_string();
     let username = options
         .0
         .get("aws_access_key_id")
-        .ok_or(DeltaTableError::generic(
-            "LakeFS username is missing in options. Set `access_key_id`.",
-        ))?
+        .ok_or(LakeFSConfigError::UsernameCredentialMissing)?
         .to_string();
     let password = options
         .0
         .get("aws_secret_access_key")
-        .ok_or(DeltaTableError::generic(
-            "LakeFS password is missing in options. Set `secret_access_key`.",
-        ))?
+        .ok_or(LakeFSConfigError::PasswordCredentialMissing)?
         .to_string();
 
     let client = LakeFSClient::with_config(LakeFSConfig::new(host, username, password));

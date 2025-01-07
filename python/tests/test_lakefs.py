@@ -499,3 +499,33 @@ def test_checkpoint(sample_data: pa.Table, lakefs_storage_options, lakefs_client
 
     assert branch.object(last_checkpoint_path).exists()
     assert branch.object(checkpoint_path).exists()
+
+
+@pytest.mark.lakefs
+@pytest.mark.integration
+def test_storage_options(sample_data: pa.Table):
+    with pytest.raises(
+        DeltaError, match="LakeFS endpoint is missing in storage options."
+    ):
+        write_deltalake(
+            "lakefs://bronze/main/oops",
+            data=sample_data,
+            storage_options={
+                "allow_http": "true",
+                "access_key_id": "LAKEFSID",
+                "secret_access_key": "LAKEFSKEY",
+            },
+        )
+
+    with pytest.raises(
+        DeltaError, match="LakeFS username is missing in storage options."
+    ):
+        write_deltalake(
+            "lakefs://bronze/main/oops",
+            data=sample_data,
+            storage_options={
+                "endpoint": "http://127.0.0.1:8000",
+                "allow_http": "true",
+                "bearer_token": "test",
+            },
+        )
