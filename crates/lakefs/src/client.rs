@@ -9,6 +9,8 @@ use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
+use crate::errors::LakeFSOperationError;
+
 #[derive(Debug, Clone)]
 pub struct LakeFSConfig {
     host: String,
@@ -70,7 +72,7 @@ impl LakeFSClient {
             .basic_auth(&self.config.username, Some(&self.config.password))
             .send()
             .await
-            .map_err(|e| DeltaTableError::generic(format!("Failed to send request: {}", e)))?;
+            .map_err(|e| LakeFSOperationError::HttpRequestFailed { source: e })?;
 
         // Handle the response
         match response.status() {
@@ -80,17 +82,10 @@ impl LakeFSClient {
                     "lakefs://{}/{}/{}",
                     repo, transaction_branch, table
                 ))
-                .map_err(|_| {
-                    DeltaTableError::InvalidTableLocation(format!(
-                        "lakefs://{}/{}/{}",
-                        repo, transaction_branch, table
-                    ))
-                })?;
+                .unwrap();
                 Ok((new_url, transaction_branch))
             }
-            StatusCode::UNAUTHORIZED => Err(DeltaTableError::generic(
-                "Unauthorized request, please check credentials/access.",
-            )),
+            StatusCode::UNAUTHORIZED => Err(LakeFSOperationError::UnauthorizedAction.into()),
             _ => {
                 let error: LakeFSErrorResponse =
                     response
@@ -99,10 +94,7 @@ impl LakeFSClient {
                         .unwrap_or_else(|_| LakeFSErrorResponse {
                             message: "Unknown error occurred.".to_string(),
                         });
-                Err(DeltaTableError::generic(format!(
-                    "LakeFS: {}",
-                    error.message
-                )))
+                Err(LakeFSOperationError::CreateBranchFailed(error.message).into())
             }
         }
     }
@@ -122,26 +114,13 @@ impl LakeFSClient {
             .basic_auth(&self.config.username, Some(&self.config.password))
             .send()
             .await
-            .map_err(|e| TransactionError::LogStoreError {
-                msg: format!("Failed to send request: {}", e),
-                source: Box::new(DeltaTableError::generic(format!(
-                    "Failed to send request: {}",
-                    e
-                ))),
-            })?;
+            .map_err(|e| LakeFSOperationError::HttpRequestFailed { source: e })?;
 
         debug!("Deleting LakeFS Branch.");
         // Handle the response
         match response.status() {
             StatusCode::NO_CONTENT => return Ok(()),
-            StatusCode::UNAUTHORIZED => {
-                return Err(TransactionError::LogStoreError {
-                    msg: "Unauthorized request, please check credentials/access.".to_string(),
-                    source: Box::new(DeltaTableError::generic(
-                        "Unauthorized request, please check credentials/access.",
-                    )),
-                })
-            }
+            StatusCode::UNAUTHORIZED => Err(LakeFSOperationError::UnauthorizedAction.into()),
             _ => {
                 let error: LakeFSErrorResponse =
                     response
@@ -150,13 +129,7 @@ impl LakeFSClient {
                         .unwrap_or_else(|_| LakeFSErrorResponse {
                             message: "Unknown error occurred.".to_string(),
                         });
-                Err(TransactionError::LogStoreError {
-                    msg: format!("LakeFS: {}", error.message),
-                    source: Box::new(DeltaTableError::generic(format!(
-                        "LakeFS: {}",
-                        error.message
-                    ))),
-                })
+                Err(LakeFSOperationError::DeleteBranchFailed(error.message).into())
             }
         }
     }
@@ -189,16 +162,12 @@ impl LakeFSClient {
             .basic_auth(&self.config.username, Some(&self.config.password))
             .send()
             .await
-            .map_err(|e| DeltaTableError::generic(format!("Failed to send request: {}", e)))?;
+            .map_err(|e| LakeFSOperationError::HttpRequestFailed { source: e })?;
 
         // Handle the response
         match response.status() {
-            StatusCode::NO_CONTENT | StatusCode::CREATED => return Ok(()),
-            StatusCode::UNAUTHORIZED => {
-                return Err(DeltaTableError::generic(
-                    "Unauthorized request, please check credentials/access.",
-                ))
-            }
+            StatusCode::NO_CONTENT | StatusCode::CREATED => Ok(()),
+            StatusCode::UNAUTHORIZED => Err(LakeFSOperationError::UnauthorizedAction.into()),
             _ => {
                 let error: LakeFSErrorResponse =
                     response
@@ -207,12 +176,9 @@ impl LakeFSClient {
                         .unwrap_or_else(|_| LakeFSErrorResponse {
                             message: "Unknown error occurred.".to_string(),
                         });
-                return Err(DeltaTableError::generic(format!(
-                    "LakeFS: {}",
-                    error.message
-                )));
+                Err(LakeFSOperationError::CommitFailed(error.message).into())
             }
-        };
+        }
     }
 
     pub async fn merge(
@@ -246,28 +212,13 @@ impl LakeFSClient {
             .basic_auth(&self.config.username, Some(&self.config.password))
             .send()
             .await
-            .map_err(|e| TransactionError::LogStoreError {
-                msg: format!("Failed to send request: {}", e),
-                source: Box::new(DeltaTableError::generic(format!(
-                    "Failed to send request: {}",
-                    e
-                ))),
-            })?;
+            .map_err(|e| LakeFSOperationError::HttpRequestFailed { source: e })?;
 
         // Handle the response;
         match response.status() {
-            StatusCode::OK => return Ok(()),
-            StatusCode::CONFLICT => {
-                return Err(TransactionError::VersionAlreadyExists(commit_version))
-            }
-            StatusCode::UNAUTHORIZED => {
-                return Err(TransactionError::LogStoreError {
-                    msg: "Unauthorized request, please check credentials/access.".to_string(),
-                    source: Box::new(DeltaTableError::generic(
-                        "Unauthorized request, please check credentials/access.",
-                    )),
-                })
-            }
+            StatusCode::OK => Ok(()),
+            StatusCode::CONFLICT => Err(TransactionError::VersionAlreadyExists(commit_version)),
+            StatusCode::UNAUTHORIZED => Err(LakeFSOperationError::UnauthorizedAction.into()),
             _ => {
                 let error: LakeFSErrorResponse =
                     response
@@ -276,37 +227,27 @@ impl LakeFSClient {
                         .unwrap_or_else(|_| LakeFSErrorResponse {
                             message: "Unknown error occurred.".to_string(),
                         });
-                return Err(TransactionError::LogStoreError {
-                    msg: format!("LakeFS: {}", error.message),
-                    source: Box::new(DeltaTableError::generic(format!(
-                        "LakeFS: {}",
-                        error.message
-                    ))),
-                });
+                Err(LakeFSOperationError::MergeFailed(error.message).into())
             }
-        };
+        }
     }
 
-    pub fn set_transaction(&self, id: Uuid, branch: String) -> DeltaResult<()> {
+    pub fn set_transaction(&self, id: Uuid, branch: String) {
         self.transactions.insert(id, branch);
         debug!("{}", format!("LakeFS Transaction `{}` has been set.", id));
-        Ok(())
     }
 
-    pub fn get_transaction(&self, id: Uuid) -> String {
+    pub fn get_transaction(&self, id: Uuid) -> Result<String, TransactionError> {
         let transaction_branch = self
             .transactions
             .get(&id)
-            .expect(&format!(
-                "Tried getting transaction {}, but transaction not found. Something went wrong.",
-                id
-            ))
-            .to_string();
+            .map(|v| v.to_string())
+            .ok_or(LakeFSOperationError::TransactionIdNotFound(id.to_string()))?;
         debug!(
             "{}",
             format!("LakeFS Transaction `{}` has been grabbed.", id)
         );
-        transaction_branch
+        Ok(transaction_branch)
     }
 
     pub fn clear_transaction(&self, id: Uuid) {

@@ -94,7 +94,7 @@ impl LakeFSLogStore {
         let string_url = format!(
             "lakefs://{}/{}/{}",
             repo,
-            self.client.get_transaction(operation_id),
+            self.client.get_transaction(operation_id)?,
             table
         );
         let transaction_url = Url::parse(&string_url).unwrap();
@@ -121,17 +121,12 @@ impl LakeFSLogStore {
         self.register_object_store(&lakefs_url, txn_store);
 
         // set transaction in client for easy retrieval
-        self.client.set_transaction(operation_id, tnx_branch)?;
+        self.client.set_transaction(operation_id, tnx_branch);
         Ok(())
     }
 
     pub async fn commit_merge(&self, operation_id: Uuid) -> DeltaResult<()> {
-        let (transaction_url, _) = self
-            .get_transaction_objectstore(operation_id)
-            .map_err(|e| TransactionError::LogStoreError {
-                msg: e.to_string(),
-                source: Box::new(e),
-            })?;
+        let (transaction_url, _) = self.get_transaction_objectstore(operation_id)?;
 
         // Do LakeFS Commit
         let (repo, transaction_branch, table) = self.client.decompose_url(transaction_url);
@@ -142,11 +137,7 @@ impl LakeFSLogStore {
                 format!("Delta file operations {{ table: {}}}", table),
                 true, // Needs to be true, it could be a file operation but no logs were deleted.
             )
-            .await
-            .map_err(|e| TransactionError::LogStoreError {
-                msg: e.to_string(),
-                source: Box::new(e),
-            })?;
+            .await?;
 
         // Try LakeFS Branch merge of transaction branch in source branch
         let (repo, target_branch, table) =
@@ -156,7 +147,7 @@ impl LakeFSLogStore {
             .merge(
                 repo,
                 target_branch,
-                self.client.get_transaction(operation_id),
+                self.client.get_transaction(operation_id)?,
                 0,
                 format!("Finished delta file operations {{ table: {}}}", table),
                 true, // Needs to be true, it could be a file operation but no logs were deleted.
@@ -166,7 +157,7 @@ impl LakeFSLogStore {
             Ok(_) => {
                 let (repo, _, _) = self.client.decompose_url(self.config.location.to_string());
                 self.client
-                    .delete_branch(repo, self.client.get_transaction(operation_id))
+                    .delete_branch(repo, self.client.get_transaction(operation_id)?)
                     .await?;
                 Ok(())
             }
@@ -255,7 +246,7 @@ impl LogStore for LakeFSLogStore {
                     .merge(
                         repo,
                         target_branch,
-                        self.client.get_transaction(operation_id),
+                        self.client.get_transaction(operation_id)?,
                         version,
                         format!(
                             "Finished deltalake transaction {{ table: {}, version: {} }}",
@@ -291,7 +282,7 @@ impl LogStore for LakeFSLogStore {
             CommitOrBytes::LogBytes(_) => {
                 let (repo, _, _) = self.client.decompose_url(self.config.location.to_string());
                 self.client
-                    .delete_branch(repo, self.client.get_transaction(operation_id))
+                    .delete_branch(repo, self.client.get_transaction(operation_id)?)
                     .await?;
                 self.client.clear_transaction(operation_id);
                 Ok(())
@@ -362,7 +353,7 @@ impl CustomExecuteHandler for LakeFSCustomExecuteHandler {
                 .decompose_url(lakefs_store.config.location.to_string());
             let result = lakefs_store
                 .client
-                .delete_branch(repo, lakefs_store.client.get_transaction(operation_id))
+                .delete_branch(repo, lakefs_store.client.get_transaction(operation_id)?)
                 .await
                 .map_err(|e| DeltaTableError::Transaction { source: e });
             lakefs_store.client.clear_transaction(operation_id);
