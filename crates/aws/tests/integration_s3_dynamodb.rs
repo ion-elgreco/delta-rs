@@ -24,6 +24,7 @@ use object_store::path::Path;
 use serde_json::Value;
 use serial_test::serial;
 use tracing::log::*;
+use uuid::Uuid;
 
 use maplit::hashmap;
 use object_store::{PutOptions, PutPayload};
@@ -95,7 +96,7 @@ async fn test_create_s3_table() -> TestResult<()> {
     let _ = pretty_env_logger::try_init();
     let context = IntegrationContext::new(Box::new(S3Integration::default()))?;
     let _client = make_client()?;
-    let table_name = format!("{}_{}", "create_test", uuid::Uuid::new_v4());
+    let table_name = format!("{}_{}", "create_test", Uuid::new_v4());
     let table_uri = context.uri_for_table(TestTables::Custom(table_name.to_owned()));
 
     let schema = StructType::new(vec![StructField::new(
@@ -138,10 +139,7 @@ async fn get_missing_item() -> TestResult<()> {
     let client = make_client()?;
     let version = i64::MAX;
     let result = client
-        .get_commit_entry(
-            &format!("s3a://my_delta_table_{}", uuid::Uuid::new_v4()),
-            version,
-        )
+        .get_commit_entry(&format!("s3a://my_delta_table_{}", Uuid::new_v4()), version)
         .await;
     assert_eq!(result.unwrap(), None);
     Ok(())
@@ -449,7 +447,7 @@ fn add_action(name: &str) -> Action {
 }
 
 async fn prepare_table(context: &IntegrationContext, table_name: &str) -> TestResult<DeltaTable> {
-    let table_name = format!("{}_{}", table_name, uuid::Uuid::new_v4());
+    let table_name = format!("{}_{}", table_name, Uuid::new_v4());
     let table_uri = context.uri_for_table(TestTables::Custom(table_name.to_owned()));
     let schema = StructType::new(vec![StructField::new(
         "Id".to_string(),
