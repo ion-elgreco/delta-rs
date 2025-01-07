@@ -232,6 +232,7 @@ impl LakeFSClient {
         let body = json!({
             "message": commit_message,
             "allow_empty": allow_empty,
+            "squash_merge": true,
         });
 
         debug!(

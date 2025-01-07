@@ -1,6 +1,6 @@
 services:
   lakefs:
-    image: docker.io/treeverse/lakefs:1.47
+    image: docker.io/treeverse/lakefs:1.48
     ports:
       - "8000:8000"
     environment:

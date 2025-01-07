@@ -99,7 +99,7 @@ jobs:
         uses: ./.github/actions/setup-env
 
       - name: Start emulated services
-        run: docker compose -f docker-compose-lakefs.yml up -d
+        run: docker compose -f ../docker-compose-lakefs.yml up -d
 
       - name: Build and install deltalake
         run: make develop
