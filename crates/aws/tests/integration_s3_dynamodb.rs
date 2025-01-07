@@ -253,6 +253,7 @@ async fn test_abort_commit_entry() -> TestResult<()> {
         .abort_commit_entry(
             entry.version,
             CommitOrBytes::TmpCommit(entry.temp_path.clone()),
+            Uuid::new_v4(),
         )
         .await?;
 
@@ -268,7 +269,11 @@ async fn test_abort_commit_entry() -> TestResult<()> {
 
     // Test abort commit is idempotent - still works if already aborted
     log_store
-        .abort_commit_entry(entry.version, CommitOrBytes::TmpCommit(entry.temp_path))
+        .abort_commit_entry(
+            entry.version,
+            CommitOrBytes::TmpCommit(entry.temp_path),
+            Uuid::new_v4(),
+        )
         .await?;
 
     Ok(())
@@ -301,7 +306,8 @@ async fn test_abort_commit_entry_fail_to_delete_entry() -> TestResult<()> {
         log_store
             .abort_commit_entry(
                 entry.version,
-                CommitOrBytes::TmpCommit(entry.temp_path.clone())
+                CommitOrBytes::TmpCommit(entry.temp_path.clone()),
+                Uuid::new_v4(),
             )
             .await,
         Err(_),
