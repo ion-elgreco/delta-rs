@@ -155,6 +155,7 @@ impl RestoreBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     log_store: LogStoreRef,
     snapshot: DeltaTableState,

@@ -690,6 +690,7 @@ impl MergePlan {
     }
 
     /// Perform the operations outlined in the plan.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute(
         mut self,
         log_store: LogStoreRef,

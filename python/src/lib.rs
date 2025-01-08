@@ -310,7 +310,7 @@ impl RawDeltaTable {
     /// This will acquire the internal lock since it is a mutating operation!
     pub fn load_version(&self, py: Python, version: i64) -> PyResult<()> {
         py.allow_threads(|| {
-            Ok(rt().block_on(async {
+            rt().block_on(async {
                 let mut table = self
                     ._table
                     .lock()
@@ -320,14 +320,14 @@ impl RawDeltaTable {
                     .await
                     .map_err(PythonError::from)
                     .map_err(PyErr::from)
-            })?)
+            })
         })
     }
 
     /// Retrieve the latest version from the internally loaded table state
     pub fn get_latest_version(&self, py: Python) -> PyResult<i64> {
         py.allow_threads(|| {
-            Ok(rt().block_on(async {
+            rt().block_on(async {
                 match self._table.lock() {
                     Ok(table) => table
                         .get_latest_version()
@@ -336,13 +336,13 @@ impl RawDeltaTable {
                         .map_err(PyErr::from),
                     Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
                 }
-            })?)
+            })
         })
     }
 
     pub fn get_earliest_version(&self, py: Python) -> PyResult<i64> {
         py.allow_threads(|| {
-            Ok(rt().block_on(async {
+            rt().block_on(async {
                 match self._table.lock() {
                     Ok(table) => table
                         .get_earliest_version()
@@ -351,7 +351,7 @@ impl RawDeltaTable {
                         .map_err(PyErr::from),
                     Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
                 }
-            })?)
+            })
         })
     }
 
@@ -380,7 +380,7 @@ impl RawDeltaTable {
                 DateTime::<Utc>::from(DateTime::<FixedOffset>::parse_from_rfc3339(ds).map_err(
                     |err| PyValueError::new_err(format!("Failed to parse datetime string: {err}")),
                 )?);
-            Ok(rt().block_on(async {
+            rt().block_on(async {
                 let mut table = self
                     ._table
                     .lock()
@@ -390,7 +390,7 @@ impl RawDeltaTable {
                     .await
                     .map_err(PythonError::from)
                     .map_err(PyErr::from)
-            })?)
+            })
         })
     }
 
@@ -2116,11 +2116,7 @@ fn create_deltalake(
         let mode = mode.parse().map_err(PythonError::from)?;
         let schema: StructType = (&schema.0).try_into().map_err(PythonError::from)?;
 
-        let use_lakefs_handler = if table.log_store().name() == "LakeFSLogStore" {
-            true
-        } else {
-            false
-        };
+        let use_lakefs_handler = table.log_store().name() == "LakeFSLogStore";
 
         let mut builder = DeltaOps(table)
             .create()
@@ -2182,11 +2178,7 @@ fn write_new_deltalake(
 
         let schema: StructType = (&schema.0).try_into().map_err(PythonError::from)?;
 
-        let use_lakefs_handler = if table.log_store().name() == "LakeFSLogStore" {
-            true
-        } else {
-            false
-        };
+        let use_lakefs_handler = table.log_store().name() == "LakeFSLogStore";
 
         let mut builder = DeltaOps(table)
             .create()

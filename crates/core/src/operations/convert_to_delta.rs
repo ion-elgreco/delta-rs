@@ -121,8 +121,7 @@ impl Default for ConvertToDeltaBuilder {
 
 impl super::Operation<()> for ConvertToDeltaBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
-        &self
-            .log_store
+        self.log_store
             .as_ref()
             .expect("Log store should be available at this stage.")
     }

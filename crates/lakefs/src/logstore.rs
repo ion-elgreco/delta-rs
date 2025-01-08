@@ -258,7 +258,7 @@ impl LogStore for LakeFSLogStore {
                         store
                             .delete(&commit_uri_from_version(version))
                             .await
-                            .map_err(|err| TransactionError::from(err))?;
+                            .map_err(TransactionError::from)?;
                         return Err(TransactionError::VersionAlreadyExists(version));
                     }
                     Err(err) => Err(err),
@@ -303,9 +303,7 @@ impl LogStore for LakeFSLogStore {
     fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
         match operation_id {
             Some(id) => {
-                let (_, store) = self.get_transaction_objectstore(id).expect(
-                    &format!("The object_store registry inside LakeFSLogstore didn't have a store for operation_id {} Something went wrong.", id)
-                );
+                let (_, store) = self.get_transaction_objectstore(id).unwrap_or_else(|_| panic!("The object_store registry inside LakeFSLogstore didn't have a store for operation_id {} Something went wrong.", id));
                 store
             }
             _ => self.reading_object_store(),

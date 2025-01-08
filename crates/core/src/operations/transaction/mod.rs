@@ -531,9 +531,9 @@ impl<'a> PreCommit<'a> {
             }
             let log_entry = this.data.get_bytes()?;
 
-            // With the DefaultLogStore, we just pass the bytes around, since we use conditionalPuts
+            // With the DefaultLogStore & LakeFSLogstore, we just pass the bytes around, since we use conditionalPuts
             // Other stores will use tmp_commits
-            let commit_or_bytes = if vec!["LakeFSLogStore", "DefaultLogStore"]
+            let commit_or_bytes = if ["LakeFSLogStore", "DefaultLogStore"]
                 .contains(&this.log_store.name().as_str())
             {
                 CommitOrBytes::LogBytes(log_entry)

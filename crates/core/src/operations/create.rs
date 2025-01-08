@@ -69,8 +69,7 @@ pub struct CreateBuilder {
 
 impl super::Operation<()> for CreateBuilder {
     fn get_log_store(&self) -> &LogStoreRef {
-        &self
-            .log_store
+        self.log_store
             .as_ref()
             .expect("Logstore shouldn't be none at this stage.")
     }

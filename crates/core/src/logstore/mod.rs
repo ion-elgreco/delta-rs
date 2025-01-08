@@ -214,7 +214,7 @@ pub trait LogStore: Send + Sync + AsAny {
 
             let (store, _prefix) = entry
                 .value()
-                .parse_url_opts(&url, &self.config().options.clone().into())?;
+                .parse_url_opts(url, &self.config().options.clone())?;
             return Ok(store);
         }
         Err(DeltaTableError::InvalidTableLocation(url.to_string()))

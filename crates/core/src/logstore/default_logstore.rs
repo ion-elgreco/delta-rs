@@ -4,15 +4,12 @@ use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
-use url::Url;
 use uuid::Uuid;
 
 use super::{CommitOrBytes, LogStore, LogStoreConfig};
 use crate::{
     operations::transaction::TransactionError,
-    storage::{
-        commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRef, ObjectStoreRegistry,
-    },
+    storage::{commit_uri_from_version, ObjectStoreRef},
     DeltaResult,
 };
 
@@ -28,7 +25,7 @@ fn put_options() -> &'static PutOptions {
 /// Default [`LogStore`] implementation
 #[derive(Debug, Clone)]
 pub struct DefaultLogStore {
-    pub(crate) storage: DefaultObjectStoreRegistry,
+    pub(crate) storage: ObjectStoreRef,
     config: LogStoreConfig,
 }
 
@@ -40,12 +37,7 @@ impl DefaultLogStore {
     /// * `storage` - A shared reference to an [`object_store::ObjectStore`] with "/" pointing at delta table root (i.e. where `_delta_log` is located).
     /// * `location` - A url corresponding to the storage location of `storage`.
     pub fn new(storage: ObjectStoreRef, config: LogStoreConfig) -> Self {
-        let registry = DefaultObjectStoreRegistry::new();
-        registry.register_store(&config.location, storage);
-        Self {
-            storage: registry,
-            config,
-        }
+        Self { storage, config }
     }
 }
 
@@ -70,7 +62,6 @@ impl LogStore for DefaultLogStore {
         commit_or_bytes: CommitOrBytes,
         _: Uuid,
     ) -> Result<(), TransactionError> {
-        // ADD LAKEFS COMMIT + MERGE HERE, should only
         match commit_or_bytes {
             CommitOrBytes::LogBytes(log_bytes) => self
                 .object_store(None)
@@ -114,7 +105,7 @@ impl LogStore for DefaultLogStore {
     }
 
     fn object_store(&self, _: Option<Uuid>) -> Arc<dyn ObjectStore> {
-        self.storage.get_store(&self.config.location).unwrap()
+        self.storage.clone()
     }
 
     fn reading_object_store(&self) -> Arc<dyn ObjectStore> {

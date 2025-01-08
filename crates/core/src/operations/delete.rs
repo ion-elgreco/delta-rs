@@ -304,6 +304,7 @@ async fn excute_non_empty_expr(
     Ok(actions)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     predicate: Option<Expr>,
     log_store: LogStoreRef,

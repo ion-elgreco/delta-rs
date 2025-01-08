@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use deltalake_core::operations::transaction::TransactionError;
-use deltalake_core::{DeltaResult, DeltaTableError};
+use deltalake_core::DeltaResult;
 use reqwest::Client;
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -119,7 +119,7 @@ impl LakeFSClient {
         debug!("Deleting LakeFS Branch.");
         // Handle the response
         match response.status() {
-            StatusCode::NO_CONTENT => return Ok(()),
+            StatusCode::NO_CONTENT => Ok(()),
             StatusCode::UNAUTHORIZED => Err(LakeFSOperationError::UnauthorizedAction.into()),
             _ => {
                 let error: LakeFSErrorResponse =

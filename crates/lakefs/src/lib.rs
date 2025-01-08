@@ -42,9 +42,8 @@ impl LogStoreFactory for LakeFSLogStoreFactory {
 pub fn register_handlers(_additional_prefixes: Option<Url>) {
     let object_stores = Arc::new(LakeFSObjectStoreFactory::default());
     let log_stores = Arc::new(LakeFSLogStoreFactory::default());
-    for scheme in ["lakefs"].iter() {
-        let url = Url::parse(&format!("{}://", scheme)).unwrap();
-        factories().insert(url.clone(), object_stores.clone());
-        logstores().insert(url.clone(), log_stores.clone());
-    }
+    let scheme = "lakefs";
+    let url = Url::parse(&format!("{}://", scheme)).unwrap();
+    factories().insert(url.clone(), object_stores.clone());
+    logstores().insert(url.clone(), log_stores.clone());
 }
