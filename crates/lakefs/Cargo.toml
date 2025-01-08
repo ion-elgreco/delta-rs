@@ -13,8 +13,6 @@ rust-version.workspace = true
 
 [dependencies]
 deltalake-core = { version = "0.23.0", path = "../core" }
-lazy_static = "1"
-
 # workspace dependencies
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -27,8 +25,6 @@ tokio = { workspace = true }
 regex = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 url = { workspace = true }
-backon = { version = "1",default-features = false, features = [ "tokio-sleep" ] }
-hyper-tls = { version = "0.5", optional = true }
 dashmap = "6"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

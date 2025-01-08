@@ -1,4 +1,4 @@
-//! LakFS storage backend (internally S3).
+//! LakeFS storage backend (internally S3).
 
 use deltalake_core::storage::object_store::aws::AmazonS3ConfigKey;
 use deltalake_core::storage::{
@@ -94,7 +94,3 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
         Ok((store, prefix))
     }
 }
-
-// TODO: ADD LakeFSObjectStore which can also work with unsafe_put for backwards compatible, this will be
-// Just a bare put where we don't check if hte object exists. In theory this will be safe, since deltalake
-// writer will never use the same transaction branch.

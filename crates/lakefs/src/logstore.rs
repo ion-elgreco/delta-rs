@@ -6,9 +6,7 @@ use crate::client::LakeFSConfig;
 use crate::errors::LakeFSConfigError;
 
 use super::client::LakeFSClient;
-use async_trait::async_trait;
 use bytes::Bytes;
-use deltalake_core::operations::CustomExecuteHandler;
 use deltalake_core::storage::{
     commit_uri_from_version, DefaultObjectStoreRegistry, ObjectStoreRegistry,
 };
@@ -20,7 +18,6 @@ use deltalake_core::{
     DeltaResult,
 };
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
-use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
@@ -59,10 +56,10 @@ pub fn lakefs_logstore(
 
 /// Default [`LogStore`] implementation
 #[derive(Debug, Clone)]
-pub struct LakeFSLogStore {
+pub(crate) struct LakeFSLogStore {
     pub(crate) storage: DefaultObjectStoreRegistry,
-    config: LogStoreConfig,
-    client: LakeFSClient,
+    pub(crate) config: LogStoreConfig,
+    pub(crate) client: LakeFSClient,
 }
 
 impl LakeFSLogStore {
@@ -327,83 +324,4 @@ fn put_options() -> &'static PutOptions {
         tags: TagSet::default(),
         attributes: Attributes::default(),
     })
-}
-
-pub struct LakeFSCustomExecuteHandler {}
-
-#[async_trait]
-impl CustomExecuteHandler for LakeFSCustomExecuteHandler {
-    // LakeFS Log store pre execution of delta operation (create branch, logs object store and transaction)
-    async fn pre_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()> {
-        debug!("Running LakeFS pre execution inside delta operation");
-        if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
-            lakefs_store.pre_execute(operation_id).await
-        } else {
-            Err(DeltaTableError::generic(
-                "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
-            ))
-        }
-    }
-    // Not required for LakeFS
-    async fn post_execute(&self, log_store: &LogStoreRef, operation_id: Uuid) -> DeltaResult<()> {
-        debug!("Running LakeFS post execution inside delta operation");
-        if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>() {
-            let (repo, _, _) = lakefs_store
-                .client
-                .decompose_url(lakefs_store.config.location.to_string());
-            let result = lakefs_store
-                .client
-                .delete_branch(repo, lakefs_store.client.get_transaction(operation_id)?)
-                .await
-                .map_err(|e| DeltaTableError::Transaction { source: e });
-            lakefs_store.client.clear_transaction(operation_id);
-            result
-        } else {
-            Err(DeltaTableError::generic(
-                "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
-            ))
-        }
-    }
-
-    // Execute arbitrary code at the start of the post commit hook
-    async fn before_post_commit_hook(
-        &self,
-        log_store: &LogStoreRef,
-        file_operations: bool,
-        operation_id: Uuid,
-    ) -> DeltaResult<()> {
-        if file_operations {
-            debug!("Running LakeFS pre execution inside post_commit_hook");
-            if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>()
-            {
-                lakefs_store.pre_execute(operation_id).await
-            } else {
-                Err(DeltaTableError::generic(
-                    "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
-                ))
-            }?;
-        }
-        Ok(())
-    }
-
-    // Execute arbitrary code at the end of the post commit hook
-    async fn after_post_commit_hook(
-        &self,
-        log_store: &LogStoreRef,
-        file_operations: bool,
-        operation_id: Uuid,
-    ) -> DeltaResult<()> {
-        if file_operations {
-            debug!("Running LakeFS post execution inside post_commit_hook");
-            if let Some(lakefs_store) = log_store.clone().as_any().downcast_ref::<LakeFSLogStore>()
-            {
-                lakefs_store.commit_merge(operation_id).await
-            } else {
-                Err(DeltaTableError::generic(
-                    "LakeFSPreEcuteHandler is used, but no LakeFSLogStore has been found",
-                ))
-            }?;
-        }
-        Ok(())
-    }
 }

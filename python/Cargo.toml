@@ -46,7 +46,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 reqwest = { version = "*", features = ["native-tls-vendored"] }
 
 deltalake-mount = { path = "../crates/mount" }
-deltalake-lakefs = { path = "../crates/lakefs" }
 
 [dependencies.pyo3]
 version = "0.22.6"
@@ -55,7 +54,7 @@ features = ["extension-module", "abi3", "abi3-py39", "gil-refs"]
 [dependencies.deltalake]
 path = "../crates/deltalake"
 version = "0"
-features = ["azure", "gcs", "python", "datafusion", "unity-experimental", "hdfs"]
+features = ["azure", "gcs", "python", "datafusion", "unity-experimental", "hdfs", "lakefs"]
 
 [features]
 default = ["rustls"]

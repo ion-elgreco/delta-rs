@@ -31,6 +31,7 @@ use deltalake::errors::DeltaTableError;
 use deltalake::kernel::{
     scalars::ScalarExt, Action, Add, Invariant, LogicalFile, Remove, StructType, Transaction,
 };
+use deltalake::lakefs::LakeFSCustomExecuteHandler;
 use deltalake::logstore::LogStoreRef;
 use deltalake::operations::add_column::AddColumnBuilder;
 use deltalake::operations::add_feature::AddTableFeatureBuilder;
@@ -58,7 +59,6 @@ use deltalake::storage::{IORuntime, ObjectStoreRef};
 use deltalake::table::state::DeltaTableState;
 use deltalake::DeltaTableBuilder;
 use deltalake::{DeltaOps, DeltaResult};
-use deltalake_lakefs::logstore::LakeFSCustomExecuteHandler;
 use error::DeltaError;
 use futures::future::join_all;
 use tracing::log::*;
@@ -2342,7 +2342,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     deltalake::gcp::register_handlers(None);
     deltalake::hdfs::register_handlers(None);
     deltalake_mount::register_handlers(None);
-    deltalake_lakefs::register_handlers(None);
+    deltalake::lakefs::register_handlers(None);
 
     let py = m.py();
     m.add("DeltaError", py.get_type_bound::<DeltaError>())?;

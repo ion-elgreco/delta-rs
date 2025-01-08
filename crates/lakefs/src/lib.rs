@@ -5,11 +5,13 @@
 
 pub mod client;
 pub mod errors;
+pub mod execute;
 pub mod logstore;
 pub mod storage;
 use deltalake_core::logstore::{logstores, LogStore, LogStoreFactory};
 use deltalake_core::storage::{factories, url_prefix_handler, ObjectStoreRef, StorageOptions};
 use deltalake_core::{DeltaResult, Path};
+pub use execute::LakeFSCustomExecuteHandler;
 use logstore::lakefs_logstore;
 use std::sync::Arc;
 use storage::LakeFSObjectStoreFactory;
