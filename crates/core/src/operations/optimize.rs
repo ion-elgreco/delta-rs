@@ -748,7 +748,7 @@ impl MergePlan {
                 #[cfg(not(feature = "datafusion"))]
                 let exec_context = Arc::new(zorder::ZOrderExecContext::new(
                     zorder_columns,
-                    log_store.object_store(),
+                    log_store.object_store(Some(operation_id)),
                     // If there aren't enough bins to use all threads, then instead
                     // use threads within the bins. This is important for the case where
                     // the table is un-partitioned, in which case the entire table is just
