@@ -94,3 +94,94 @@ impl ObjectStoreFactory for LakeFSObjectStoreFactory {
         Ok((store, prefix))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use maplit::hashmap;
+    use serial_test::serial;
+
+    struct ScopedEnv {
+        vars: HashMap<std::ffi::OsString, std::ffi::OsString>,
+    }
+
+    impl ScopedEnv {
+        pub fn new() -> Self {
+            let vars = std::env::vars_os().collect();
+            Self { vars }
+        }
+
+        pub fn run<T>(mut f: impl FnMut() -> T) -> T {
+            let _env_scope = Self::new();
+            f()
+        }
+    }
+
+    fn clear_env_of_lakefs_s3_keys() {
+        let keys_to_clear = std::env::vars().filter_map(|(k, _v)| {
+            if AmazonS3ConfigKey::from_str(&k.to_ascii_lowercase()).is_ok() {
+                Some(k)
+            } else {
+                None
+            }
+        });
+
+        for k in keys_to_clear {
+            unsafe {
+                std::env::remove_var(k);
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn when_merging_with_env_unsupplied_options_are_added() {
+        ScopedEnv::run(|| {
+            clear_env_of_lakefs_s3_keys();
+            let raw_options = hashmap! {};
+            std::env::set_var("ACCESS_KEY_ID", "env_key");
+            std::env::set_var("ENDPOINT", "env_key");
+            std::env::set_var("SECRET_ACCESS_KEY", "env_key");
+            std::env::set_var("REGION", "env_key");
+            let combined_options =
+                LakeFSObjectStoreFactory {}.with_env_s3(&StorageOptions(raw_options));
+
+            // Four and then the conditional_put built-in
+            assert_eq!(combined_options.0.len(), 5);
+
+            for (key, v) in combined_options.0 {
+                if key != "conditional_put" {
+                    assert_eq!(v, "env_key");
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn when_merging_with_env_supplied_options_take_precedence() {
+        ScopedEnv::run(|| {
+            clear_env_of_lakefs_s3_keys();
+            let raw_options = hashmap! {
+                "ACCESS_KEY_ID".to_string() => "options_key".to_string(),
+                "ENDPOINT_URL".to_string() => "options_key".to_string(),
+                "SECRET_ACCESS_KEY".to_string() => "options_key".to_string(),
+                "REGION".to_string() => "options_key".to_string()
+            };
+            std::env::set_var("aws_access_key_id", "env_key");
+            std::env::set_var("aws_endpoint", "env_key");
+            std::env::set_var("aws_secret_access_key", "env_key");
+            std::env::set_var("aws_region", "env_key");
+
+            let combined_options =
+                LakeFSObjectStoreFactory {}.with_env_s3(&StorageOptions(raw_options));
+
+            for (key, v) in combined_options.0 {
+                if key != "conditional_put" {
+                    assert_eq!(v, "options_key");
+                }
+            }
+        });
+    }
+}
