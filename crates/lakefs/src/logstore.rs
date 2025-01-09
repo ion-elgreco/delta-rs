@@ -18,6 +18,7 @@ use deltalake_core::{
     DeltaResult,
 };
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
+use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
@@ -77,6 +78,24 @@ impl LakeFSLogStore {
             config,
             client,
         }
+    }
+
+    /// Build a new object store for an URL using the existing storage options. After
+    /// branch creation a new object store needs to be created for the branch uri
+    fn build_new_store(&self, url: &Url) -> DeltaResult<ObjectStoreRef> {
+        // turn location into scheme
+        let scheme = Url::parse(&format!("{}://", url.scheme()))
+            .map_err(|_| DeltaTableError::InvalidTableLocation(url.clone().into()))?;
+
+        if let Some(entry) = deltalake_core::storage::factories().get(&scheme) {
+            debug!("Creating new storage with storage provider for {scheme} ({url})");
+
+            let (store, _prefix) = entry
+                .value()
+                .parse_url_opts(url, &self.config().options.clone())?;
+            return Ok(store);
+        }
+        Err(DeltaTableError::InvalidTableLocation(url.to_string()))
     }
 
     fn register_object_store(&self, url: &Url, store: ObjectStoreRef) {

@@ -203,23 +203,6 @@ pub trait LogStore: Send + Sync + AsAny {
         Ok(())
     }
 
-    /// Build a new object store for an URL using the existing storage options
-    fn build_new_store(&self, url: &Url) -> DeltaResult<ObjectStoreRef> {
-        // turn location into scheme
-        let scheme = Url::parse(&format!("{}://", url.scheme()))
-            .map_err(|_| DeltaTableError::InvalidTableLocation(url.clone().into()))?;
-
-        if let Some(entry) = crate::storage::factories().get(&scheme) {
-            debug!("Creating new storage with storage provider for {scheme} ({url})");
-
-            let (store, _prefix) = entry
-                .value()
-                .parse_url_opts(url, &self.config().options.clone())?;
-            return Ok(store);
-        }
-        Err(DeltaTableError::InvalidTableLocation(url.to_string()))
-    }
-
     /// Read data for commit entry with the given version.
     async fn read_commit_entry(&self, version: i64) -> DeltaResult<Option<Bytes>>;
 

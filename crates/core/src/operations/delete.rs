@@ -100,11 +100,11 @@ pub struct DeleteMetrics {
 }
 
 impl super::Operation<()> for DeleteBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 

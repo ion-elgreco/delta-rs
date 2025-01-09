@@ -95,13 +95,11 @@ pub trait CustomExecuteHandler: Send + Sync {
 /// The [Operation] trait defines common behaviors that all operations builders
 /// should have consistent
 pub(crate) trait Operation<State>: std::future::IntoFuture {
-    fn get_log_store(&self) -> &LogStoreRef;
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>>;
+    fn log_store(&self) -> &LogStoreRef;
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>>;
     async fn pre_execute(&self, operation_id: Uuid) -> DeltaResult<()> {
         if let Some(handler) = self.get_custom_execute_handler() {
-            handler
-                .pre_execute(self.get_log_store(), operation_id)
-                .await
+            handler.pre_execute(self.log_store(), operation_id).await
         } else {
             Ok(())
         }
@@ -109,9 +107,7 @@ pub(crate) trait Operation<State>: std::future::IntoFuture {
 
     async fn post_execute(&self, operation_id: Uuid) -> DeltaResult<()> {
         if let Some(handler) = self.get_custom_execute_handler() {
-            handler
-                .post_execute(self.get_log_store(), operation_id)
-                .await
+            handler.post_execute(self.log_store(), operation_id).await
         } else {
             Ok(())
         }

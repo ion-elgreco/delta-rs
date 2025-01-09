@@ -599,7 +599,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                     cleanup_expired_logs: None,
                     log_store: this.log_store,
                     table_data: this.table_data,
-                    customer_execute_handler: this.post_commit_hook_handler,
+                    custom_execute_handler: this.post_commit_hook_handler,
                 });
             }
 
@@ -668,7 +668,7 @@ impl<'a> std::future::IntoFuture for PreparedCommit<'a> {
                                 .unwrap_or_default(),
                             log_store: this.log_store,
                             table_data: this.table_data,
-                            customer_execute_handler: this.post_commit_hook_handler,
+                            custom_execute_handler: this.post_commit_hook_handler,
                         });
                     }
                     Err(TransactionError::VersionAlreadyExists(version)) => {
@@ -701,7 +701,7 @@ pub struct PostCommit<'a> {
     cleanup_expired_logs: Option<bool>,
     log_store: LogStoreRef,
     table_data: Option<&'a dyn TableReference>,
-    customer_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
+    custom_execute_handler: Option<Arc<dyn CustomExecuteHandler>>,
 }
 
 impl PostCommit<'_> {
@@ -729,7 +729,7 @@ impl PostCommit<'_> {
             };
 
             // Run arbitrary before_post_commit_hook code
-            if let Some(custom_execute_handler) = &self.customer_execute_handler {
+            if let Some(custom_execute_handler) = &self.custom_execute_handler {
                 custom_execute_handler
                     .before_post_commit_hook(
                         &self.log_store,
@@ -762,7 +762,7 @@ impl PostCommit<'_> {
             }
 
             // Run arbitrary after_post_commit_hook code
-            if let Some(custom_execute_handler) = &self.customer_execute_handler {
+            if let Some(custom_execute_handler) = &self.custom_execute_handler {
                 custom_execute_handler
                     .after_post_commit_hook(
                         &self.log_store,

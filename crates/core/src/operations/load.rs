@@ -25,10 +25,10 @@ pub struct LoadBuilder {
 }
 
 impl super::Operation<()> for LoadBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
         unimplemented!("Not required in loadBuilder for now.")
     }
 }

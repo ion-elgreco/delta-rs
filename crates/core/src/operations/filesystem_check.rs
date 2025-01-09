@@ -78,11 +78,11 @@ fn is_absolute_path(path: &str) -> DeltaResult<bool> {
 }
 
 impl super::Operation<()> for FileSystemCheckBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 
@@ -160,7 +160,7 @@ impl FileSystemCheckPlan {
         snapshot: &DeltaTableState,
         mut commit_properties: CommitProperties,
         operation_id: Uuid,
-        handle: Option<&Arc<dyn CustomExecuteHandler>>,
+        handle: Option<Arc<dyn CustomExecuteHandler>>,
     ) -> DeltaResult<FileSystemCheckMetrics> {
         let mut actions = Vec::with_capacity(self.files_to_remove.len());
         let mut removed_file_paths = Vec::with_capacity(self.files_to_remove.len());
@@ -197,7 +197,7 @@ impl FileSystemCheckPlan {
 
         CommitBuilder::from(commit_properties)
             .with_operation_id(operation_id)
-            .with_post_commit_hook_handler(handle.cloned())
+            .with_post_commit_hook_handler(handle)
             .with_actions(actions)
             .build(
                 Some(snapshot),

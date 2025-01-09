@@ -120,11 +120,11 @@ pub struct UpdateMetrics {
 }
 
 impl super::Operation<()> for UpdateBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 

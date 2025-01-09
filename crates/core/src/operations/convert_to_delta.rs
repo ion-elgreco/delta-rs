@@ -120,13 +120,13 @@ impl Default for ConvertToDeltaBuilder {
 }
 
 impl super::Operation<()> for ConvertToDeltaBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         self.log_store
             .as_ref()
             .expect("Log store should be available at this stage.")
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 
@@ -269,16 +269,16 @@ impl ConvertToDeltaBuilder {
         self.pre_execute(operation_id).await?;
 
         // Return an error if the location is already a Delta table location
-        if self.get_log_store().is_delta_table_location().await? {
+        if self.log_store().is_delta_table_location().await? {
             return Err(Error::DeltaTableAlready);
         }
         debug!(
             "Converting Parquet table in log store location: {:?}",
-            self.get_log_store().root_uri()
+            self.log_store().root_uri()
         );
 
         // Get all the parquet files in the location
-        let object_store = self.get_log_store().object_store(None);
+        let object_store = self.log_store().object_store(None);
         let mut files = Vec::new();
         object_store
             .list(None)
@@ -421,7 +421,7 @@ impl ConvertToDeltaBuilder {
 
         // Generate CreateBuilder with corresponding add actions, schemas and operation meta
         let mut builder = CreateBuilder::new()
-            .with_log_store(self.get_log_store().clone())
+            .with_log_store(self.log_store().clone())
             .with_columns(schema_fields.into_iter().cloned())
             .with_partition_columns(partition_columns.into_iter())
             .with_actions(actions)
@@ -456,7 +456,7 @@ impl std::future::IntoFuture for ConvertToDeltaBuilder {
 
             if let Some(handler) = handler {
                 handler
-                    .post_execute(builder.get_log_store(), operation_id)
+                    .post_execute(builder.log_store(), operation_id)
                     .await?;
             }
 

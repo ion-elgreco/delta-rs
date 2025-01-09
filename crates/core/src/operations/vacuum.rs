@@ -97,11 +97,11 @@ pub struct VacuumBuilder {
 }
 
 impl super::Operation<()> for VacuumBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 
@@ -314,7 +314,7 @@ impl VacuumPlan {
         snapshot: &DeltaTableState,
         mut commit_properties: CommitProperties,
         operation_id: uuid::Uuid,
-        handle: Option<&Arc<dyn CustomExecuteHandler>>,
+        handle: Option<Arc<dyn CustomExecuteHandler>>,
     ) -> Result<VacuumMetrics, DeltaTableError> {
         if self.files_to_delete.is_empty() {
             return Ok(VacuumMetrics {
@@ -348,7 +348,7 @@ impl VacuumPlan {
 
         CommitBuilder::from(start_props)
             .with_operation_id(operation_id)
-            .with_post_commit_hook_handler(handle.cloned())
+            .with_post_commit_hook_handler(handle.clone())
             .build(Some(snapshot), store.clone(), start_operation)
             .await?;
         // Finish VACUUM START COMMIT
@@ -381,7 +381,7 @@ impl VacuumPlan {
         );
         CommitBuilder::from(commit_properties)
             .with_operation_id(operation_id)
-            .with_post_commit_hook_handler(handle.cloned())
+            .with_post_commit_hook_handler(handle)
             .build(Some(snapshot), store.clone(), end_operation)
             .await?;
         // Finish VACUUM END COMMIT

@@ -29,11 +29,11 @@ pub struct DropConstraintBuilder {
 }
 
 impl super::Operation<()> for DropConstraintBuilder {
-    fn get_log_store(&self) -> &LogStoreRef {
+    fn log_store(&self) -> &LogStoreRef {
         &self.log_store
     }
-    fn get_custom_execute_handler(&self) -> Option<&Arc<dyn CustomExecuteHandler>> {
-        self.custom_execute_handler.as_ref()
+    fn get_custom_execute_handler(&self) -> Option<Arc<dyn CustomExecuteHandler>> {
+        self.custom_execute_handler.clone()
     }
 }
 
@@ -110,7 +110,7 @@ impl std::future::IntoFuture for DropConstraintBuilder {
 
             let commit = CommitBuilder::from(this.commit_properties.clone())
                 .with_operation_id(operation_id)
-                .with_post_commit_hook_handler(this.get_custom_execute_handler().cloned())
+                .with_post_commit_hook_handler(this.get_custom_execute_handler())
                 .with_actions(actions)
                 .build(Some(&this.snapshot), this.log_store.clone(), operation)
                 .await?;
