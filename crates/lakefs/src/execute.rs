@@ -389,12 +389,10 @@ mod tests {
             .before_post_commit_hook(&invalid_default_store, false, operation_id)
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), ());
 
         let result = handler
             .after_post_commit_hook(&invalid_default_store, false, operation_id)
             .await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), ());
     }
 }
