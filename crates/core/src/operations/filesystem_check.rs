@@ -131,7 +131,7 @@ impl FileSystemCheckBuilder {
             }
         }
 
-        let object_store = log_store.reading_object_store();
+        let object_store = log_store.object_store(None);
         let mut files = object_store.list(None);
         while let Some(result) = files.next().await {
             let file = result?;

@@ -149,7 +149,7 @@ impl Snapshot {
         }
 
         let (protocol, metadata) = log_segment
-            .read_metadata(log_store.reading_object_store().clone(), &self.config)
+            .read_metadata(log_store.object_store(None).clone(), &self.config)
             .await?;
         if let Some(protocol) = protocol {
             self.protocol = protocol;
@@ -454,7 +454,7 @@ impl EagerSnapshot {
                 StructType::new(schema_actions.iter().map(|a| a.schema_field().clone()));
             new_slice
                 .checkpoint_stream(
-                    log_store.reading_object_store(),
+                    log_store.object_store(None),
                     &read_schema,
                     &self.snapshot.config,
                 )
@@ -464,7 +464,7 @@ impl EagerSnapshot {
         schema_actions.insert(ActionType::Remove);
         let read_schema = StructType::new(schema_actions.iter().map(|a| a.schema_field().clone()));
         let log_stream = new_slice.commit_stream(
-            log_store.reading_object_store().clone(),
+            log_store.object_store(None).clone(),
             &read_schema,
             &self.snapshot.config,
         )?;

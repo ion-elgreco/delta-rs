@@ -135,10 +135,6 @@ impl RawDeltaTable {
         self.with_table(|t| Ok(t.object_store().clone()))
     }
 
-    fn reading_object_store(&self) -> PyResult<ObjectStoreRef> {
-        self.with_table(|t| Ok(t.reading_object_store().clone()))
-    }
-
     fn cloned_state(&self) -> PyResult<DeltaTableState> {
         self.with_table(|t| {
             t.snapshot()
@@ -1284,7 +1280,7 @@ impl RawDeltaTable {
 
     pub fn get_py_storage_backend(&self) -> PyResult<filesystem::DeltaFileSystemHandler> {
         Ok(filesystem::DeltaFileSystemHandler {
-            inner: self.reading_object_store()?,
+            inner: self.object_store()?,
             config: self._config.clone(),
             known_sizes: None,
         })

@@ -296,17 +296,13 @@ impl LogStore for LakeFSLogStore {
         get_earliest_version(self, current_version).await
     }
 
-    fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
-        self.storage.get_store(&self.config.location).unwrap()
-    }
-
     fn object_store(&self, operation_id: Option<Uuid>) -> Arc<dyn ObjectStore> {
         match operation_id {
             Some(id) => {
                 let (_, store) = self.get_transaction_objectstore(id).unwrap_or_else(|_| panic!("The object_store registry inside LakeFSLogstore didn't have a store for operation_id {} Something went wrong.", id));
                 store
             }
-            _ => self.reading_object_store(),
+            _ => self.storage.get_store(&self.config.location).unwrap(),
         }
     }
 

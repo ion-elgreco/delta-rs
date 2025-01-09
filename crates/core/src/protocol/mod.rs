@@ -610,7 +610,7 @@ pub(crate) async fn get_last_checkpoint(
     let last_checkpoint_path = Path::from_iter(["_delta_log", "_last_checkpoint"]);
     debug!("loading checkpoint from {last_checkpoint_path}");
     match log_store
-        .reading_object_store()
+        .object_store(None)
         .get(&last_checkpoint_path)
         .await
     {
@@ -637,7 +637,7 @@ pub(crate) async fn find_latest_check_point_for_version(
     }
 
     let mut cp: Option<CheckPoint> = None;
-    let object_store = log_store.reading_object_store();
+    let object_store = log_store.object_store(None);
     let mut stream = object_store.list(Some(log_store.log_path()));
 
     while let Some(obj_meta) = stream.next().await {

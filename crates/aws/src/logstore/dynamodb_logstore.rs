@@ -317,10 +317,6 @@ impl LogStore for S3DynamoDbLogStore {
         self.storage.clone()
     }
 
-    fn reading_object_store(&self) -> ObjectStoreRef {
-        self.object_store(None)
-    }
-
     fn config(&self) -> &LogStoreConfig {
         &self.config
     }

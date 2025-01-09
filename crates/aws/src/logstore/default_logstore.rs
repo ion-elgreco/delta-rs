@@ -114,10 +114,6 @@ impl LogStore for S3LogStore {
         self.storage.clone()
     }
 
-    fn reading_object_store(&self) -> Arc<dyn ObjectStore> {
-        self.object_store(None)
-    }
-
     fn config(&self) -> &LogStoreConfig {
         &self.config
     }

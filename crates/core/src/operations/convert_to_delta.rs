@@ -278,7 +278,7 @@ impl ConvertToDeltaBuilder {
         );
 
         // Get all the parquet files in the location
-        let object_store = self.get_log_store().reading_object_store();
+        let object_store = self.get_log_store().object_store(None);
         let mut files = Vec::new();
         object_store
             .list(None)

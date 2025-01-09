@@ -177,7 +177,7 @@ pub async fn create_checkpoint_for(
 
     debug!("Writing parquet bytes to checkpoint buffer.");
     let tombstones = state
-        .unexpired_tombstones(log_store.reading_object_store().clone())
+        .unexpired_tombstones(log_store.object_store(None).clone())
         .await
         .map_err(|_| ProtocolError::Generic("filed to get tombstones".into()))?
         .collect::<Vec<_>>();
@@ -216,7 +216,7 @@ pub async fn cleanup_expired_logs_for(
             Regex::new(r"_delta_log/(\d{20})\.(json|checkpoint|json.tmp).*$").unwrap();
     }
 
-    let object_store = log_store.reading_object_store();
+    let object_store = log_store.object_store(None);
     let maybe_last_checkpoint = object_store
         .get(&log_store.log_path().child("_last_checkpoint"))
         .await;

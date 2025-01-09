@@ -214,14 +214,14 @@ impl VacuumBuilder {
             &self.snapshot,
             retention_period,
             now_millis,
-            self.log_store.reading_object_store().clone(),
+            self.log_store.object_store(None).clone(),
         )
         .await?;
         let valid_files = self.snapshot.file_paths_iter().collect::<HashSet<Path>>();
 
         let mut files_to_delete = vec![];
         let mut file_sizes = vec![];
-        let object_store = self.log_store.reading_object_store();
+        let object_store = self.log_store.object_store(None);
         let mut all_files = object_store.list(None);
         let partition_columns = &self.snapshot.metadata().partition_columns;
 

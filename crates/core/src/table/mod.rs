@@ -282,11 +282,6 @@ impl DeltaTable {
         self.log_store.object_store(None)
     }
 
-    /// get a shared reference of the reading delta object store
-    pub fn reading_object_store(&self) -> ObjectStoreRef {
-        self.log_store.reading_object_store()
-    }
-
     /// Check if the [`DeltaTable`] exists
     pub async fn verify_deltatable_existence(&self) -> DeltaResult<bool> {
         self.log_store.is_delta_table_location().await
@@ -351,7 +346,7 @@ impl DeltaTable {
             _ => {
                 let state = DeltaTableState::try_new(
                     &Path::default(),
-                    self.log_store.reading_object_store(),
+                    self.log_store.object_store(None),
                     self.config.clone(),
                     max_version,
                 )
@@ -381,7 +376,7 @@ impl DeltaTable {
             Some(ts) => Ok(ts),
             None => {
                 let meta = self
-                    .reading_object_store()
+                    .object_store()
                     .head(&commit_uri_from_version(version))
                     .await?;
                 let ts = meta.last_modified.timestamp_millis();
@@ -399,7 +394,7 @@ impl DeltaTable {
             .snapshot()?
             .snapshot
             .snapshot()
-            .commit_infos(self.reading_object_store(), limit)
+            .commit_infos(self.object_store(), limit)
             .await?
             .try_collect::<Vec<_>>()
             .await?;
@@ -520,7 +515,7 @@ impl DeltaTable {
         let log_store = self.log_store();
         let prefix = Some(log_store.log_path());
         let offset_path = commit_uri_from_version(min_version);
-        let object_store = log_store.reading_object_store();
+        let object_store = log_store.object_store(None);
         let mut files = object_store.list_with_offset(prefix, &offset_path);
 
         while let Some(obj_meta) = files.next().await {
