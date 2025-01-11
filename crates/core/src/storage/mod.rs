@@ -364,7 +364,7 @@ impl ObjectStoreFactory for DefaultObjectStoreFactory {
             "file" => {
                 let inner = Arc::new(LocalFileSystem::new_with_prefix(
                     url.to_file_path().unwrap(),
-                )?) as ObjectStoreRef;
+                )?.with_automatic_cleanup(true)) as ObjectStoreRef;
                 let store = limit_store_handler(inner, options);
                 Ok((store, Path::from("/")))
             }
