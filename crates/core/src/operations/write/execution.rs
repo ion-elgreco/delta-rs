@@ -1,33 +1,188 @@
-//! Writer for MERGE operation, can write normal and CDF data at same time
-
 use std::sync::Arc;
 use std::vec;
 
-use arrow::compute::concat_batches;
-use arrow_array::RecordBatch;
-use arrow_schema::{Schema, SchemaRef as ArrowSchemaRef};
-use datafusion::catalog::TableProvider;
-use datafusion::datasource::MemTable;
-use datafusion::execution::context::{SessionContext, SessionState, TaskContext};
-use datafusion_expr::{col, lit};
+use arrow_schema::SchemaRef as ArrowSchemaRef;
+use datafusion::datasource::provider_as_source;
+use datafusion::execution::context::{SessionState, TaskContext};
+use datafusion::prelude::DataFrame;
+use datafusion_expr::{lit, Expr, LogicalPlanBuilder};
 use datafusion_physical_plan::ExecutionPlan;
 use futures::StreamExt;
 use object_store::prefix::PrefixStore;
 use parquet::file::properties::WriterProperties;
 use tracing::log::*;
 
-use crate::operations::cdc::CDC_COLUMN_NAME;
-use crate::operations::writer::{DeltaWriter, WriterConfig};
-
-use crate::delta_datafusion::DeltaDataChecker;
+use crate::delta_datafusion::expr::fmt_expr_to_sql;
+use crate::delta_datafusion::{find_files, DeltaScanConfigBuilder, DeltaTableProvider};
+use crate::delta_datafusion::{DataFusionMixins, DeltaDataChecker};
 use crate::errors::DeltaResult;
-use crate::kernel::{Action, AddCDCFile, StructType, StructTypeExt};
-
-use crate::operations::write::{WriteError, WriterStatsConfig};
+use crate::kernel::{Action, Add, AddCDCFile, Remove, StructType, StructTypeExt};
+use crate::logstore::LogStoreRef;
+use crate::operations::writer::{DeltaWriter, WriterConfig};
 use crate::storage::ObjectStoreRef;
 use crate::table::state::DeltaTableState;
+use crate::table::Constraint as DeltaConstraint;
 
-use tokio::sync::mpsc::Sender;
+use arrow::compute::concat_batches;
+use arrow_schema::Schema;
+use datafusion::catalog::TableProvider;
+use datafusion::datasource::MemTable;
+use datafusion::execution::context::SessionContext;
+use datafusion_expr::col;
+
+use crate::operations::cdc::CDC_COLUMN_NAME;
+
+use crate::operations::write::{WriteError, WriterStatsConfig};
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_execution_plan_cdc(
+    snapshot: Option<&DeltaTableState>,
+    state: SessionState,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+) -> DeltaResult<Vec<Action>> {
+    let cdc_store = Arc::new(PrefixStore::new(object_store, "_change_data"));
+
+    Ok(write_execution_plan(
+        snapshot,
+        state,
+        plan,
+        partition_columns,
+        cdc_store,
+        target_file_size,
+        write_batch_size,
+        writer_properties,
+        writer_stats_config,
+    )
+    .await?
+    .into_iter()
+    .map(|add| {
+        // Modify add actions into CDC actions
+        match add {
+            Action::Add(add) => {
+                Action::Cdc(AddCDCFile {
+                    // This is a gnarly hack, but the action needs the nested path, not the
+                    // path isnide the prefixed store
+                    path: format!("_change_data/{}", add.path),
+                    size: add.size,
+                    partition_values: add.partition_values,
+                    data_change: false,
+                    tags: add.tags,
+                })
+            }
+            _ => panic!("Expected Add action"),
+        }
+    })
+    .collect::<Vec<_>>())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_execution_plan(
+    snapshot: Option<&DeltaTableState>,
+    state: SessionState,
+    plan: Arc<dyn ExecutionPlan>,
+    partition_columns: Vec<String>,
+    object_store: ObjectStoreRef,
+    target_file_size: Option<usize>,
+    write_batch_size: Option<usize>,
+    writer_properties: Option<WriterProperties>,
+    writer_stats_config: WriterStatsConfig,
+) -> DeltaResult<Vec<Action>> {
+    write_execution_plan_v2(
+        snapshot,
+        state,
+        plan,
+        partition_columns,
+        object_store,
+        target_file_size,
+        write_batch_size,
+        writer_properties,
+        writer_stats_config,
+        false,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_non_empty_expr(
+    snapshot: &DeltaTableState,
+    log_store: LogStoreRef,
+    state: SessionState,
+    rewrite: &[Add],
+    partition_scan: bool,
+) -> DeltaResult<Option<DataFrame>> {
+    if !partition_scan {
+        // For each identified file perform a parquet scan + filter + limit (1) + count.
+        // If returned count is not zero then append the file to be rewritten and removed from the log. Otherwise do nothing to the file.
+
+        // Take the insert plan schema since it might have been schema evolved, if its not
+        // it is simply the table schema
+        let scan_config = DeltaScanConfigBuilder::new()
+            .with_schema(snapshot.input_schema()?)
+            .build(snapshot)?;
+
+        let target_provider = Arc::new(
+            DeltaTableProvider::try_new(snapshot.clone(), log_store.clone(), scan_config.clone())?
+                .with_files(rewrite.to_vec()),
+        );
+
+        let target_provider = provider_as_source(target_provider);
+        let source = LogicalPlanBuilder::scan("target", target_provider.clone(), None)?.build()?;
+        // We don't want to verify the predicate against existing data
+
+        let df = DataFrame::new(state.clone(), source);
+
+        return Ok(Some(df));
+    } else {
+        return Ok(None);
+    }
+}
+
+// This should only be called with a valid predicate
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn prepare_predicate_actions(
+    predicate: Expr,
+    log_store: LogStoreRef,
+    snapshot: &DeltaTableState,
+    state: SessionState,
+    deletion_timestamp: i64,
+) -> DeltaResult<(Vec<Action>, Option<DataFrame>)> {
+    let candidates =
+        find_files(snapshot, log_store.clone(), &state, Some(predicate.clone())).await?;
+
+    let scan_df = execute_non_empty_expr(
+        snapshot,
+        log_store,
+        state,
+        &candidates.candidates,
+        candidates.partition_scan,
+    )
+    .await?;
+
+    let remove = candidates.candidates;
+    let mut actions = Vec::new();
+    for action in remove {
+        actions.push(Action::Remove(Remove {
+            path: action.path,
+            deletion_timestamp: Some(deletion_timestamp),
+            data_change: true,
+            extended_file_metadata: Some(true),
+            partition_values: Some(action.partition_values),
+            size: Some(action.size),
+            deletion_vector: action.deletion_vector,
+            tags: None,
+            base_row_id: action.base_row_id,
+            default_row_commit_version: action.default_row_commit_version,
+        }))
+    }
+    Ok((actions, scan_df))
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_execution_plan_v2(
@@ -40,13 +195,13 @@ pub(crate) async fn write_execution_plan_v2(
     write_batch_size: Option<usize>,
     writer_properties: Option<WriterProperties>,
     writer_stats_config: WriterStatsConfig,
-    sender: Option<Sender<RecordBatch>>,
     contains_cdc: bool,
+    predicate: Option<Expr>,
 ) -> DeltaResult<Vec<Action>> {
     // We always take the plan Schema since the data may contain Large/View arrow types,
     // the schema and batches were prior constructed with this in mind.
     let schema: ArrowSchemaRef = plan.schema();
-    let checker = if let Some(snapshot) = snapshot {
+    let mut checker = if let Some(snapshot) = snapshot {
         DeltaDataChecker::new(snapshot)
     } else {
         debug!("Using plan schema to derive generated columns, since no snapshot was provided. Implies first write.");
@@ -56,6 +211,10 @@ pub(crate) async fn write_execution_plan_v2(
         )
     };
 
+    if let Some(predicate) = predicate {
+        let chk = DeltaConstraint::new("*", &fmt_expr_to_sql(&predicate)?);
+        checker = checker.with_extra_constraints(vec![chk]);
+    };
     // Write data to disk
     let mut tasks = vec![];
     if !contains_cdc {
@@ -74,24 +233,13 @@ pub(crate) async fn write_execution_plan_v2(
             );
             let mut writer = DeltaWriter::new(object_store.clone(), config);
             let checker_stream = checker.clone();
-            let sender_stream = sender.clone();
             let mut stream = inner_plan.execute(i, task_ctx)?;
 
-            let handle: tokio::task::JoinHandle<DeltaResult<Vec<Action>>> = tokio::task::spawn(
-                async move {
-                    let sendable = sender_stream.clone();
+            let handle: tokio::task::JoinHandle<DeltaResult<Vec<Action>>> =
+                tokio::task::spawn(async move {
                     while let Some(maybe_batch) = stream.next().await {
                         let batch = maybe_batch?;
-
                         checker_stream.check_batch(&batch).await?;
-
-                        if let Some(s) = sendable.as_ref() {
-                            if let Err(e) = s.send(batch.clone()).await {
-                                error!("Failed to send data to observer: {e:#?}");
-                            }
-                        } else {
-                            debug!("write_execution_plan_with_predicate did not send any batches, no sender.");
-                        }
                         writer.write(&batch).await?;
                     }
                     let add_actions = writer.close().await;
@@ -99,8 +247,7 @@ pub(crate) async fn write_execution_plan_v2(
                         Ok(actions) => Ok(actions.into_iter().map(Action::Add).collect::<Vec<_>>()),
                         Err(err) => Err(err),
                     }
-                },
-            );
+                });
             tasks.push(handle);
         }
     } else {
@@ -150,14 +297,12 @@ pub(crate) async fn write_execution_plan_v2(
             let mut cdf_writer = DeltaWriter::new(cdf_store.clone(), cdf_config);
 
             let checker_stream = checker.clone();
-            let sender_stream = sender.clone();
             let mut stream = inner_plan.execute(i, task_ctx)?;
 
             let session_context = SessionContext::new();
 
-            let handle: tokio::task::JoinHandle<DeltaResult<Vec<Action>>> = tokio::task::spawn(
-                async move {
-                    let sendable = sender_stream.clone();
+            let handle: tokio::task::JoinHandle<DeltaResult<Vec<Action>>> =
+                tokio::task::spawn(async move {
                     while let Some(maybe_batch) = stream.next().await {
                         let batch = maybe_batch?;
 
@@ -192,14 +337,6 @@ pub(crate) async fn write_execution_plan_v2(
 
                         let cdf_batch = concat_batches(&cdf_schema, &cdf_df.collect().await?)?;
                         checker_stream.check_batch(&cdf_batch).await?;
-
-                        if let Some(s) = sendable.as_ref() {
-                            if let Err(e) = s.send(batch.clone()).await {
-                                error!("Failed to send data to observer: {e:#?}");
-                            }
-                        } else {
-                            debug!("write_execution_plan_with_predicate did not send any batches, no sender.");
-                        }
                         writer.write(&normal_batch).await?;
                         cdf_writer.write(&cdf_batch).await?;
                     }
@@ -228,8 +365,7 @@ pub(crate) async fn write_execution_plan_v2(
                     })?;
                     add_actions.extend(cdf_actions);
                     Ok(add_actions)
-                },
-            );
+                });
             tasks.push(handle);
         }
     }

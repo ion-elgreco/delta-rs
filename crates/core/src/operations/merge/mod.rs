@@ -84,16 +84,15 @@ use crate::operations::cast::merge_schema::{merge_arrow_field, merge_arrow_schem
 use crate::operations::cdc::*;
 use crate::operations::merge::barrier::find_node;
 use crate::operations::transaction::CommitBuilder;
+use crate::operations::write::execution::write_execution_plan_v2;
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::state::DeltaTableState;
 use crate::table::GeneratedColumn;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
-use writer::write_execution_plan_v2;
 
 mod barrier;
 mod filter;
-mod writer;
 
 const SOURCE_COLUMN: &str = "__delta_rs_source";
 const TARGET_COLUMN: &str = "__delta_rs_target";
@@ -1424,8 +1423,8 @@ async fn execute(
         None,
         writer_properties.clone(),
         writer_stats_config.clone(),
-        None,
         should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
+        None,
     )
     .await?;
     if let Some(schema_metadata) = schema_action {
