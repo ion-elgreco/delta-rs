@@ -5,7 +5,8 @@ use arrow_schema::SchemaRef as ArrowSchemaRef;
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::context::{SessionState, TaskContext};
 use datafusion::prelude::DataFrame;
-use datafusion_expr::{lit, Expr, LogicalPlanBuilder};
+use datafusion_common::cse::NormalizeEq;
+use datafusion_expr::{lit, when, Expr, LogicalPlanBuilder};
 use datafusion_physical_plan::ExecutionPlan;
 use futures::StreamExt;
 use object_store::prefix::PrefixStore;
@@ -211,13 +212,14 @@ pub(crate) async fn write_execution_plan_v2(
         )
     };
 
-    if let Some(predicate) = predicate {
-        let chk = DeltaConstraint::new("*", &fmt_expr_to_sql(&predicate)?);
-        checker = checker.with_extra_constraints(vec![chk]);
-    };
     // Write data to disk
     let mut tasks = vec![];
     if !contains_cdc {
+        if let Some(predicate) = &predicate {
+            let chk = DeltaConstraint::new("*", &fmt_expr_to_sql(predicate)?);
+            checker = checker.with_extra_constraints(vec![chk]);
+        };
+
         for i in 0..plan.properties().output_partitioning().partition_count() {
             let inner_plan = plan.clone();
             let inner_schema = schema.clone();
@@ -296,7 +298,20 @@ pub(crate) async fn write_execution_plan_v2(
 
             let mut cdf_writer = DeltaWriter::new(cdf_store.clone(), cdf_config);
 
-            let checker_stream = checker.clone();
+            let mut normal_checker_stream = checker.clone();
+            let cdf_checker_stream = checker.clone();
+
+            // We check the normal batches with the predicate, cdf checker_stream doesn't require this.
+            if let Some(predicate) = &predicate {
+                let chk = DeltaConstraint::new(
+                    "*",
+                    &fmt_expr_to_sql(
+                        &when(col(CDC_COLUMN_NAME).eq(lit("insert")), predicate.clone())
+                            .otherwise(lit(true))?,
+                    )?,
+                );
+                normal_checker_stream = normal_checker_stream.with_extra_constraints(vec![chk]);
+            };
             let mut stream = inner_plan.execute(i, task_ctx)?;
 
             let session_context = SessionContext::new();
@@ -313,13 +328,10 @@ pub(crate) async fn write_execution_plan_v2(
                         )?);
                         let batch_df = session_context.read_table(table_provider).unwrap();
 
-                        let normal_df = batch_df
-                            .clone()
-                            .filter(col(CDC_COLUMN_NAME).in_list(
-                                vec![lit("delete"), lit("source_delete"), lit("update_preimage")],
-                                true,
-                            ))?
-                            .drop_columns(&[CDC_COLUMN_NAME])?;
+                        let normal_df = batch_df.clone().filter(col(CDC_COLUMN_NAME).in_list(
+                            vec![lit("delete"), lit("source_delete"), lit("update_preimage")],
+                            true,
+                        ))?;
 
                         let cdf_df = batch_df.filter(col(CDC_COLUMN_NAME).in_list(
                             vec![
@@ -332,11 +344,26 @@ pub(crate) async fn write_execution_plan_v2(
                         ))?;
 
                         let normal_batch =
-                            concat_batches(&write_schema, &normal_df.collect().await?)?;
-                        checker_stream.check_batch(&normal_batch).await?;
+                            concat_batches(&cdf_schema, &normal_df.collect().await?)?;
+                        normal_checker_stream.check_batch(&normal_batch).await?;
+
+                        // Drop cdc column in normal batch
+                        let table_provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(
+                            normal_batch.schema(),
+                            vec![vec![normal_batch.clone()]],
+                        )?);
+                        let normal_batch = concat_batches(
+                            &write_schema,
+                            &session_context
+                                .read_table(table_provider)
+                                .unwrap()
+                                .drop_columns(&[CDC_COLUMN_NAME])?
+                                .collect()
+                                .await?,
+                        )?;
 
                         let cdf_batch = concat_batches(&cdf_schema, &cdf_df.collect().await?)?;
-                        checker_stream.check_batch(&cdf_batch).await?;
+                        cdf_checker_stream.check_batch(&cdf_batch).await?;
                         writer.write(&normal_batch).await?;
                         cdf_writer.write(&cdf_batch).await?;
                     }

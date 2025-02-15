@@ -32,6 +32,7 @@ use arrow_schema::Schema;
 use async_trait::async_trait;
 pub use configs::WriterStatsConfig;
 use datafusion::catalog::TableProvider;
+use datafusion::dataframe::DataFrameWriteOptions;
 use datafusion::datasource::{provider_as_source, MemTable};
 use datafusion::execution::SessionStateBuilder;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
@@ -59,7 +60,7 @@ use schema_evolution::try_cast_schema;
 use serde::{Deserialize, Serialize};
 use tracing::log::*;
 
-use super::cdc::should_write_cdc;
+use super::cdc::{should_write_cdc, CDC_COLUMN_NAME};
 use super::datafusion_utils::Expression;
 use super::transaction::{CommitBuilder, CommitProperties, TableReference, PROTOCOL};
 use super::{CreateBuilder, CustomExecuteHandler, Operation};
@@ -696,12 +697,15 @@ impl std::future::IntoFuture for WriteBuilder {
                                     Expr::Not(Box::new(Expr::IsTrue(Box::new(pred.clone()))));
                                 if should_write_cdc(snapshot)? {
                                     let cdc_df = scan_df.with_column(
-                                        "_change_type",
+                                        CDC_COLUMN_NAME,
                                         when(negated_expression, lit("copy"))
                                             .otherwise(lit("delete"))?,
                                     )?;
+
+                                    cdc_df.clone().write_parquet("debug.parquet", DataFrameWriteOptions::new(), None).await;
+
                                     input_df = input_df
-                                        .with_column("_change_type", lit("insert"))?
+                                        .with_column(CDC_COLUMN_NAME, lit("insert"))?
                                         .union(cdc_df)?;
                                     contains_cdc = true;
                                 } else {
