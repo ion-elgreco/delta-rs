@@ -36,6 +36,10 @@ tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 parking_lot = "0.12"
 
+# reqwest is pulled in by azure sdk, but not used by python binding itself
+# for binary wheel best practice, statically link openssl
+reqwest = { version = "*", features = ["native-tls-vendored"] }
+
 # runtime
 futures = { workspace = true }
 num_cpus = { workspace = true }
