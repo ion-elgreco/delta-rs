@@ -111,6 +111,7 @@ class RawDeltaTable:
         z_order_columns: List[str],
         partition_filters: Optional[PartitionFilterType],
         target_size: Optional[int],
+        bin_files: bool,
         max_concurrent_tasks: Optional[int],
         max_spill_size: Optional[int],
         min_commit_interval: Optional[int],

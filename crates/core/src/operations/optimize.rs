@@ -187,6 +187,8 @@ pub enum OptimizeType {
     Compact,
     /// Z-order files based on provided columns
     ZOrder(Vec<String>),
+    /// Z-order files based on provided columns
+    ZOrderCompact(Vec<String>),
 }
 
 /// Optimize a Delta table with given options
@@ -426,6 +428,14 @@ enum OptimizeOperations {
     ZOrder(
         Vec<String>,
         HashMap<String, (IndexMap<String, Scalar>, MergeBin)>,
+    ),
+    /// Plan to Z-order each partition
+    ///
+    /// Bins are determined by the bin-packing algorithm to reach an optimal size.
+    /// This to distribute work across bins with max file size
+    ZOrderCompact(
+        Vec<String>,
+        HashMap<String, (IndexMap<String, Scalar>, Vec<MergeBin>)>,
     ),
     // TODO: Sort
 }
@@ -774,6 +784,66 @@ impl MergePlan {
                     })
                     .boxed()
             }
+            OptimizeOperations::ZOrderCompact(zorder_columns, bins) => {
+                debug!("Starting zorder with the columns: {zorder_columns:?} {bins:?}");
+
+                #[cfg(not(feature = "datafusion"))]
+                let exec_context = Arc::new(zorder::ZOrderExecContext::new(
+                    zorder_columns,
+                    log_store.object_store(Some(operation_id)),
+                    // If there aren't enough bins to use all threads, then instead
+                    // use threads within the bins. This is important for the case where
+                    // the table is un-partitioned, in which case the entire table is just
+                    // one big bin.
+                    bins.len() <= num_cpus::get(),
+                ));
+
+                #[cfg(feature = "datafusion")]
+                let exec_context = Arc::new(zorder::ZOrderExecContext::new(
+                    zorder_columns,
+                    log_store.object_store(Some(operation_id)),
+                    max_spill_size,
+                )?);
+                let task_parameters = self.task_parameters.clone();
+
+                use crate::delta_datafusion::DataFusionMixins;
+                use crate::delta_datafusion::DeltaScanConfigBuilder;
+                use crate::delta_datafusion::DeltaTableProvider;
+
+                let scan_config = DeltaScanConfigBuilder::default()
+                    .with_file_column(false)
+                    .with_schema(snapshot.input_schema()?)
+                    .build(&snapshot)?;
+
+                // For each rewrite evaluate the predicate and then modify each expression
+                // to either compute the new value or obtain the old one then write these batches
+                let log_store = log_store.clone();
+                futures::stream::iter(bins)
+                    .flat_map(|(_, (partition, bins))| {
+                        futures::stream::iter(bins).map(move |bin| (partition.clone(), bin))
+                    })
+                    .map(move |(partition, files)| {
+                        let batch_stream = Self::read_zorder(
+                            files.clone(),
+                            exec_context.clone(),
+                            DeltaTableProvider::try_new(
+                                snapshot.clone(),
+                                log_store.clone(),
+                                scan_config.clone(),
+                            )
+                            .unwrap(),
+                        );
+                        let rewrite_result = tokio::task::spawn(Self::rewrite_files(
+                            task_parameters.clone(),
+                            partition,
+                            files,
+                            log_store.object_store(Some(operation_id)),
+                            batch_stream,
+                        ));
+                        util::flatten_join_error(rewrite_result)
+                    })
+                    .boxed()
+            }
         };
 
         let mut stream = stream.buffer_unordered(max_concurrent_tasks);
@@ -881,6 +951,13 @@ pub fn create_merge_plan(
         OptimizeType::ZOrder(zorder_columns) => {
             build_zorder_plan(zorder_columns, snapshot, partitions_keys, filters)?
         }
+        OptimizeType::ZOrderCompact(zorder_columns) => build_zorder_compact_plan(
+            zorder_columns,
+            snapshot,
+            partitions_keys,
+            filters,
+            target_size,
+        )?,
     };
 
     let input_parameters = OptimizeInput {
@@ -949,19 +1026,26 @@ impl IntoIterator for MergeBin {
     }
 }
 
-fn build_compaction_plan(
+fn build_bins(
+    // Table snapshot
     snapshot: &DeltaTableState,
+    // Parititon filters to fetch add actions
     filters: &[PartitionFilter],
+    // target_size of each bin
     target_size: i64,
-) -> Result<(OptimizeOperations, Metrics), DeltaTableError> {
+    // Skip files in bins if they are larger than target_size
+    skip_files_larger_than_target_size: bool,
+) -> DeltaResult<(
+    HashMap<String, (IndexMap<String, Scalar>, Vec<MergeBin>)>,
+    Metrics,
+)> {
     let mut metrics = Metrics::default();
 
     let mut partition_files: HashMap<String, (IndexMap<String, Scalar>, Vec<Add>)> = HashMap::new();
     for add in snapshot.get_active_add_actions_by_partitions(filters)? {
         let add = add?;
         metrics.total_considered_files += 1;
-        let object_meta = ObjectMeta::try_from(&add)?;
-        if (object_meta.size as i64) > target_size {
+        if (add.size() as i64) > target_size && skip_files_larger_than_target_size {
             metrics.total_files_skipped += 1;
             continue;
         }
@@ -1003,6 +1087,15 @@ fn build_compaction_plan(
 
         operations.insert(part, (partition, merge_bins));
     }
+    Ok((operations, metrics))
+}
+
+fn build_compaction_plan(
+    snapshot: &DeltaTableState,
+    filters: &[PartitionFilter],
+    target_size: i64,
+) -> Result<(OptimizeOperations, Metrics), DeltaTableError> {
+    let (mut operations, mut metrics) = build_bins(snapshot, filters, target_size, true)?;
 
     // Prune merge bins with only 1 file, since they have no effect
     for (_, (_, bins)) in operations.iter_mut() {
@@ -1078,6 +1171,53 @@ fn build_zorder_plan(
     }
 
     let operation = OptimizeOperations::ZOrder(zorder_columns, partition_files);
+    Ok((operation, metrics))
+}
+
+fn build_zorder_compact_plan(
+    zorder_columns: Vec<String>,
+    snapshot: &DeltaTableState,
+    partition_keys: &[String],
+    filters: &[PartitionFilter],
+    target_size: i64,
+) -> Result<(OptimizeOperations, Metrics), DeltaTableError> {
+    if zorder_columns.is_empty() {
+        return Err(DeltaTableError::Generic(
+            "Z-order requires at least one column".to_string(),
+        ));
+    }
+    let zorder_partition_cols = zorder_columns
+        .iter()
+        .filter(|col| partition_keys.contains(col))
+        .collect_vec();
+    if !zorder_partition_cols.is_empty() {
+        return Err(DeltaTableError::Generic(format!(
+            "Z-order columns cannot be partition columns. Found: {zorder_partition_cols:?}"
+        )));
+    }
+    let field_names = snapshot
+        .schema()
+        .fields()
+        .map(|field| field.name().to_string())
+        .collect_vec();
+    let unknown_columns = zorder_columns
+        .iter()
+        .filter(|col| !field_names.contains(col))
+        .collect_vec();
+    if !unknown_columns.is_empty() {
+        return Err(DeltaTableError::Generic(
+            format!("Z-order columns must be present in the table schema. Unknown columns: {unknown_columns:?}"),
+        ));
+    }
+
+    let (operations_bins, metrics) = build_bins(
+        snapshot,
+        filters,
+        target_size,
+        false, // We don't skip files larger than target size, since we still want to z-order
+    )?;
+
+    let operation = OptimizeOperations::ZOrderCompact(zorder_columns, operations_bins);
     Ok((operation, metrics))
 }
 

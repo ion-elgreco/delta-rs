@@ -644,6 +644,7 @@ impl RawDeltaTable {
     #[pyo3(signature = (z_order_columns,
         partition_filters = None,
         target_size = None,
+        bin_files = false,
         max_concurrent_tasks = None,
         max_spill_size = 20 * 1024 * 1024 * 1024,
         min_commit_interval = None,
@@ -656,6 +657,7 @@ impl RawDeltaTable {
         z_order_columns: Vec<String>,
         partition_filters: Option<Vec<(PyBackedStr, PyBackedStr, PartitionFilterValue)>>,
         target_size: Option<i64>,
+        bin_files: bool,
         max_concurrent_tasks: Option<usize>,
         max_spill_size: usize,
         min_commit_interval: Option<u64>,
@@ -667,7 +669,11 @@ impl RawDeltaTable {
             let mut cmd = OptimizeBuilder::new(self.log_store()?, self.cloned_state()?)
                 .with_max_concurrent_tasks(max_concurrent_tasks.unwrap_or_else(num_cpus::get))
                 .with_max_spill_size(max_spill_size)
-                .with_type(OptimizeType::ZOrder(z_order_columns));
+                .with_type(if bin_files {
+                    OptimizeType::ZOrderCompact(z_order_columns)
+                } else {
+                    OptimizeType::ZOrder(z_order_columns)
+                });
             if let Some(size) = target_size {
                 cmd = cmd.with_target_size(size);
             }
