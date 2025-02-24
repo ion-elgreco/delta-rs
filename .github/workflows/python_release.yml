@@ -2,7 +2,7 @@ name: Release to PyPI and documentation
 
 on:
   push:
-    branches: [debug/wheel]
+    branches: [debug/wheel-higher-arch]
 
 defaults:
   run:
@@ -20,10 +20,6 @@ jobs:
           target: aarch64-unknown-linux-gnu
           command: build
           args: -m python/Cargo.toml
-          before-script-linux: |
-            # We can remove this once we upgrade to 2_28.
-            # https://github.com/briansmith/ring/issues/1728
-            export CFLAGS_aarch64_unknown_linux_gnu="-D__ARM_ARCH=8"
       - name: Upload built wheel
         uses: actions/upload-artifact@v4
         with:
