@@ -27,6 +27,10 @@ datafusion-ffi = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# reqwest is pulled in by azure sdk, but not used by python binding itself
+# for binary wheel best practice, statically link openssl
+reqwest = { version = "*", features = ["native-tls-vendored"] }
+
 # "stdlib"
 chrono = { workspace = true }
 env_logger = "0"
