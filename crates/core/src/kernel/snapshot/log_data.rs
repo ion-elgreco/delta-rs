@@ -284,7 +284,7 @@ impl LogicalFile<'_> {
             .and_then(|c| Scalar::from_array(c.as_ref(), self.index))
     }
 
-    pub fn add_action(&self) -> Add {
+    pub fn add_action(&self, skip_stats: bool) -> Add {
         Add {
             path: self.path().to_string(),
             partition_values: self
@@ -308,7 +308,11 @@ impl LogicalFile<'_> {
             size: self.size(),
             modification_time: self.modification_time(),
             data_change: true,
-            stats: Scalar::from_array(self.stats as &dyn Array, self.index).map(|s| s.serialize()),
+            stats: if !skip_stats {
+                Scalar::from_array(self.stats as &dyn Array, self.index).map(|s| s.serialize())
+            } else {
+                None
+            },
             tags: None,
             deletion_vector: self.deletion_vector().map(|dv| dv.descriptor()),
             base_row_id: None,

@@ -971,7 +971,7 @@ fn build_compaction_plan(
             .entry(add.partition_values()?.hive_partition_path())
             .or_insert_with(|| (partition_values, vec![]))
             .1
-            .push(add.add_action());
+            .push(add.add_action(true));
     }
 
     for (_, file) in partition_files.values_mut() {
@@ -1069,9 +1069,9 @@ fn build_zorder_plan(
             .entry(partition_values.hive_partition_path())
             .or_insert_with(|| (partition_values, MergeBin::new()))
             .1
-            .add(add.add_action());
-        debug!("partition_files inside the zorder plan: {partition_files:?}");
+            .add(add.add_action(true));
     }
+    // debug!("partition_files inside the zorder plan: {partition_files:?}");
 
     let operation = OptimizeOperations::ZOrder(zorder_columns, partition_files);
     Ok((operation, metrics))
