@@ -27,7 +27,7 @@
 //!     })?
 //!     .await?
 //! ````
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -35,10 +35,11 @@ use std::time::Instant;
 
 use arrow_schema::{DataType, Field, SchemaBuilder};
 use async_trait::async_trait;
-use datafusion::datasource::provider_as_source;
+use datafusion::catalog::TableProvider;
+use datafusion::datasource::{provider_as_source, stream, MemTable};
 use datafusion::error::Result as DataFusionResult;
 use datafusion::execution::context::SessionConfig;
-use datafusion::execution::session_state::SessionStateBuilder;
+use datafusion::execution::session_state::{self, SessionStateBuilder};
 use datafusion::logical_expr::build_join_schema;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::metrics::MetricBuilder;
@@ -54,12 +55,14 @@ use datafusion_expr::execution_props::ExecutionProps;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::{col, conditional_expressions::CaseBuilder, lit, when, Expr, JoinType};
 use datafusion_expr::{
-    Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode, UNNAMED_TABLE,
+    Extension, LogicalPlan, LogicalPlanBuilder, TableSource, UserDefinedLogicalNode, UNNAMED_TABLE
 };
 
 use delta_kernel::schema::{ColumnMetadataKey, StructType};
 use filter::try_construct_early_filter;
 use futures::future::BoxFuture;
+use futures::{StreamExt, TryStreamExt};
+use object_store::ObjectStore;
 use parquet::file::properties::WriterProperties;
 use serde::Serialize;
 use tracing::log::*;
@@ -76,7 +79,7 @@ use crate::delta_datafusion::physical::{find_metric_node, get_metric, MetricObse
 use crate::delta_datafusion::planner::DeltaPlanner;
 use crate::delta_datafusion::{
     register_store, DataFusionMixins, DeltaColumn, DeltaScan, DeltaScanConfigBuilder,
-    DeltaSessionConfig, DeltaTableProvider,
+    DeltaSessionConfig, DeltaTableProvider, FileScope,
 };
 
 use crate::kernel::{Action, Metadata, StructTypeExt};
@@ -92,7 +95,7 @@ use crate::operations::write::generated_columns::{
 use crate::operations::write::WriterStatsConfig;
 use crate::protocol::{DeltaOperation, MergePredicate};
 use crate::table::state::DeltaTableState;
-use crate::{DeltaResult, DeltaTable, DeltaTableError};
+use crate::{table, DeltaResult, DeltaTable, DeltaTableError};
 
 mod barrier;
 mod filter;
@@ -746,14 +749,27 @@ async fn execute(
     let exec_start = Instant::now();
     // Determining whether we should write change data once so that computation of change data can
     // be disabled in the common case(s)
+    
+
     let should_cdc = should_write_cdc(&snapshot)?;
     // Change data may be collected and then written out at the completion of the merge
-
     if should_cdc {
         debug!("Executing a merge and I should write CDC!");
     }
 
     let current_metadata = snapshot.metadata();
+
+    let table_partition_cols = current_metadata.partition_columns.clone();
+
+    let writer_stats_config = WriterStatsConfig::new(
+        snapshot.table_config().num_indexed_cols(),
+        snapshot
+            .table_config()
+            .stats_columns()
+            .map(|v| v.iter().map(|v| v.to_string()).collect::<Vec<String>>()),
+    );
+    
+
     let merge_planner = DeltaPlanner::<MergeMetricExtensionPlanner> {
         extension_planner: MergeMetricExtensionPlanner {},
     };
@@ -789,21 +805,15 @@ async fn execute(
 
     let (source, missing_generated_columns) =
         add_missing_generated_columns(source, &generated_col_expressions)?;
+
     // This is only done to provide the source columns with a correct table reference. Just renaming the columns does not work
     let source = LogicalPlanBuilder::scan(
         source_name.clone(),
-        provider_as_source(source.into_view()),
+        provider_as_source(source.clone().into_view()),
         None,
     )?
     .build()?;
 
-    let source = LogicalPlan::Extension(Extension {
-        node: Arc::new(MetricObserver {
-            id: SOURCE_COUNT_ID.into(),
-            input: source,
-            enable_pushdown: false,
-        }),
-    });
 
     let scan_config = DeltaScanConfigBuilder::default()
         .with_file_column(true)
@@ -811,18 +821,21 @@ async fn execute(
         .with_schema(snapshot.input_schema()?)
         .build(&snapshot)?;
 
+    let file_column = Arc::new(scan_config.file_column_name.clone().unwrap());
+
     let target_provider = Arc::new(DeltaTableProvider::try_new(
         snapshot.clone(),
         log_store.clone(),
         scan_config.clone(),
     )?);
 
-    let target_provider = provider_as_source(target_provider);
+
+    let target_provider: Arc<dyn TableSource> = provider_as_source(target_provider);
     let target =
         LogicalPlanBuilder::scan(target_name.clone(), target_provider.clone(), None)?.build()?;
 
-    let source_schema = source.schema();
     let target_schema = target.schema();
+    let source_schema = source.schema();
 
     let join_schema_df = build_join_schema(source_schema, target_schema, &JoinType::Full)?;
 
@@ -830,86 +843,6 @@ async fn execute(
         Expression::DataFusion(expr) => expr,
         Expression::String(s) => parse_predicate_expression(&join_schema_df, s, &state)?,
     };
-
-    // Attempt to construct an early filter that we can apply to the Add action list and the delta scan.
-    // In the case where there are partition columns in the join predicate, we can scan the source table
-    // to get the distinct list of partitions affected and constrain the search to those.
-
-    let target_subset_filter: Option<Expr> = if !not_match_source_operations.is_empty() {
-        // It's only worth trying to create an early filter where there are no `when_not_matched_source` operators, since
-        // that implies a full scan
-        None
-    } else {
-        try_construct_early_filter(
-            predicate.clone(),
-            &snapshot,
-            &state,
-            &source,
-            &source_name,
-            &target_name,
-            streaming,
-        )
-        .await?
-    }
-    .map(|e| {
-        // simplify the expression so we have
-        let props = ExecutionProps::new();
-        let simplify_context = SimplifyContext::new(&props).with_schema(target.schema().clone());
-        let simplifier = ExprSimplifier::new(simplify_context).with_max_cycles(10);
-        simplifier.simplify(e).unwrap()
-    });
-
-    // Predicate will be used for conflict detection
-    let commit_predicate = match target_subset_filter.clone() {
-        None => None, // No predicate means it's a full table merge
-        Some(some_filter) => {
-            let predict_expr = match &target_alias {
-                None => some_filter,
-                Some(alias) => remove_table_alias(some_filter, alias),
-            };
-            Some(fmt_expr_to_sql(&predict_expr)?)
-        }
-    };
-
-    debug!("Using target subset filter: {:?}", commit_predicate);
-
-    let file_column = Arc::new(scan_config.file_column_name.clone().unwrap());
-    // Need to manually push this filter into the scan... We want to PRUNE files not FILTER RECORDS
-    let target = match target_subset_filter {
-        Some(filter) => {
-            let filter = match &target_alias {
-                Some(alias) => remove_table_alias(filter, alias),
-                None => filter,
-            };
-            LogicalPlanBuilder::scan_with_filters(
-                target_name.clone(),
-                target_provider,
-                None,
-                vec![filter],
-            )?
-            .build()?
-        }
-        None => LogicalPlanBuilder::scan(target_name.clone(), target_provider, None)?.build()?,
-    };
-
-    let source = DataFrame::new(state.clone(), source.clone());
-    let source = source.with_column(SOURCE_COLUMN, lit(true))?;
-
-    // Not match operations imply a full scan of the target table is required
-    let enable_pushdown =
-        not_match_source_operations.is_empty() && not_match_target_operations.is_empty();
-    let target = LogicalPlan::Extension(Extension {
-        node: Arc::new(MetricObserver {
-            id: TARGET_COUNT_ID.into(),
-            input: target,
-            enable_pushdown,
-        }),
-    });
-    let target = DataFrame::new(state.clone(), target);
-    let target = target.with_column(TARGET_COLUMN, lit(true))?;
-
-    let join = source.join(target, JoinType::Full, &[], &[], Some(predicate.clone()))?;
-    let join_schema_df = join.schema().to_owned();
 
     let match_operations: Vec<MergeOperation> = match_operations
         .into_iter()
@@ -1075,9 +1008,7 @@ async fn execute(
     then_expr.push(lit(ops.len() as i32));
     ops.push((HashMap::new(), OperationType::Copy));
 
-    let case = CaseBuilder::new(None, when_expr, then_expr, None).end()?;
-
-    let projection = join.with_column(OPERATION_COLUMN, case)?;
+    let operation_column_case = CaseBuilder::new(None, when_expr, then_expr, None).end()?;
 
     let mut new_columns = vec![];
 
@@ -1267,128 +1198,385 @@ async fn execute(
         build_case(copy_when, copy_then)?,
     ));
 
-    let new_columns = {
-        let plan = projection.into_unoptimized_plan();
-        let mut fields: Vec<Expr> = plan
-            .schema()
-            .columns()
-            .iter()
-            .map(|f| col(f.clone()))
-            .collect();
 
-        fields.extend(new_columns.into_iter().map(|(name, ex)| ex.alias(name)));
+    let object_store = log_store.object_store(Some(operation_id));
+    // If it's a streamed source and we don't have not matched source operations
+    // we can actually do batch by batch sub execution to derive source stats
+    let (mut actions, rewrite_start, target_subset_filter, survivors,mut metrics) = if streaming && not_match_source_operations.is_empty() {
+        // let ctx = SessionContext::new_with_state(state.clone());
+        let source = DataFrame::new(state.clone(), source.clone());
+        let mut source_stream = source.execute_stream().await?;
+        
+        let mut all_actions = Vec::new();
+        let mut min_write_start_time = None;
+        let mut all_survivors: HashSet<String> = HashSet::new();
 
-        LogicalPlanBuilder::from(plan).project(fields)?.build()?
-    };
+        let mut all_file_scope = FileScope::default();
 
-    let distribute_expr = col(file_column.as_str());
+        while let Some(batch) = source_stream.next().await.and_then(|b|b.ok()) {
+            // split batch since we unioned upstream the operation write and cdf plan
+            let source_batch_table_provider: Arc<dyn TableProvider> = Arc::new(MemTable::try_new(
+                batch.schema(),
+                vec![vec![batch.clone()]],
+            )?);
 
-    let merge_barrier = LogicalPlan::Extension(Extension {
-        node: Arc::new(MergeBarrier {
-            input: new_columns.clone(),
-            expr: distribute_expr,
-            file_column,
-        }),
-    });
-
-    // We should observe the metrics before we union the merge plan with the cdf_merge plan
-    // so that we get the metrics only for the merge plan.
-    let operation_count = LogicalPlan::Extension(Extension {
-        node: Arc::new(MetricObserver {
-            id: OUTPUT_COUNT_ID.into(),
-            input: merge_barrier,
-            enable_pushdown: false,
-        }),
-    });
-
-    let operation_count = DataFrame::new(state.clone(), operation_count);
-
-    let mut projected = if should_cdc {
-        operation_count
-            .clone()
-            .with_column(
-                CDC_COLUMN_NAME,
-                when(col(TARGET_DELETE_COLUMN).is_null(), lit("delete")) // nulls are equal to True
-                    .when(col(DELETE_COLUMN).is_null(), lit("source_delete"))
-                    .when(col(TARGET_COPY_COLUMN).is_null(), lit("copy"))
-                    .when(col(TARGET_INSERT_COLUMN).is_null(), lit("insert"))
-                    .when(col(TARGET_UPDATE_COLUMN).is_null(), lit("update"))
-                    .end()?,
+            // This is only done to provide the source columns with a correct table reference. Just renaming the columns does not work
+            let sub_source = LogicalPlanBuilder::scan(
+                source_name.clone(),
+                provider_as_source(source_batch_table_provider),
+                None,
             )?
-            .drop_columns(&["__delta_rs_path"])? // WEIRD bug caused by interaction with unnest_columns, has to be dropped otherwise throws schema error
-            .with_column(
-                "__delta_rs_update_expanded",
-                when(
-                    col(CDC_COLUMN_NAME).eq(lit("update")),
-                    lit(ScalarValue::List(ScalarValue::new_list(
-                        &[
-                            ScalarValue::Utf8(Some("update_preimage".into())),
-                            ScalarValue::Utf8(Some("update_postimage".into())),
-                        ],
-                        &DataType::List(Field::new("element", DataType::Utf8, false).into()),
-                        true,
-                    ))),
-                )
-                .end()?,
-            )?
-            .unnest_columns(&["__delta_rs_update_expanded"])?
-            .with_column(
-                CDC_COLUMN_NAME,
-                when(
-                    col(CDC_COLUMN_NAME).eq(lit("update")),
-                    col("__delta_rs_update_expanded"),
-                )
-                .otherwise(col(CDC_COLUMN_NAME))?,
-            )?
-            .drop_columns(&["__delta_rs_update_expanded"])?
-            .select(write_projection_with_cdf)?
+            .build()?;
+            
+
+            let sub_source = LogicalPlan::Extension(Extension {
+                node: Arc::new(MetricObserver {
+                    id: SOURCE_COUNT_ID.into(),
+                    input: sub_source,
+                    enable_pushdown: false,
+                }),
+            });
+
+            let (mut actions, write_start_time, _target_subset_filter, survivors, new_metrics, file_scope) = sub_execute(
+                &not_match_source_operations, 
+                &not_match_target_operations, 
+                &operation_column_case, 
+                new_columns.clone(), 
+                &predicate, 
+                &snapshot, 
+                &state, 
+                &sub_source, 
+                target_schema, 
+                target_provider.clone(), 
+                &source_name, 
+                &target_name, 
+                target_alias.clone(), 
+                file_column.clone(), 
+                should_cdc, 
+                &write_projection_with_cdf, 
+                &write_projection, 
+                &generated_col_expressions,
+                &missing_generated_columns, 
+                &table_partition_cols, 
+                object_store.clone(), 
+                writer_properties.clone(), 
+                writer_stats_config.clone(), 
+                false, // keep at false so it properly prunes since we do batch by batch 
+                metrics).await?;
+
+            metrics = new_metrics;
+            all_actions.append(&mut actions);
+            if min_write_start_time.is_none() {
+                min_write_start_time = Some(write_start_time)
+            }
+            all_survivors = all_survivors.union(&survivors).into_iter().map(|v|v.clone()).collect::<HashSet<String>>().clone();
+            all_file_scope.scanned = all_file_scope.scanned.union(&file_scope.scanned).into_iter().map(|v|v.clone()).collect::<HashSet<String>>();
+
+            let pruned = all_file_scope.skipped.union(&file_scope.skipped).into_iter().map(|v|v.clone()).collect::<HashSet<String>>();
+            // In subsequent iters we might have actually scanned the file, so we check the proper difference before saying its pruned
+            all_file_scope.skipped = pruned.difference(&all_file_scope.scanned).into_iter().map(|v|v.clone()).collect::<HashSet<String>>();
+
+        }
+        metrics.num_target_files_scanned = all_file_scope.scanned.len();
+        metrics.num_target_files_skipped_during_scan = all_file_scope.skipped.len();
+
+        (all_actions, min_write_start_time.unwrap_or_else(||Instant::now()), None, all_survivors, metrics)
     } else {
-        operation_count
-            .filter(col(DELETE_COLUMN).is_false())?
-            .select(write_projection)?
+
+        let source = LogicalPlan::Extension(Extension {
+            node: Arc::new(MetricObserver {
+                id: SOURCE_COUNT_ID.into(),
+                input: source,
+                enable_pushdown: false,
+            }),
+        });
+
+        let (actions, write_start_time, target_subset_filter, survivors, mut metrics, file_scope) = sub_execute(
+            &not_match_source_operations, 
+            &not_match_target_operations, 
+            &operation_column_case, 
+            new_columns, 
+            &predicate, 
+            &snapshot, 
+            &state, 
+            &source, 
+            target_schema, 
+            target_provider,
+            &source_name, 
+            &target_name, 
+            target_alias.clone(), 
+            file_column, 
+            should_cdc, 
+            &write_projection_with_cdf, 
+            &write_projection, 
+            &generated_col_expressions,
+            &missing_generated_columns, 
+            &table_partition_cols, 
+            object_store, 
+            writer_properties, 
+            writer_stats_config, 
+            streaming, 
+            metrics).await?;
+
+        metrics.num_target_files_scanned = file_scope.scanned.len();
+        metrics.num_target_files_skipped_during_scan = file_scope.skipped.len();
+        (actions, write_start_time, target_subset_filter, survivors, metrics)
+
     };
 
-    projected = add_generated_columns(
-        projected,
-        &generated_col_expressions,
-        &missing_generated_columns,
-        &state,
-    )?;
+    async fn sub_execute(
+        not_match_source_operations: &Vec<MergePredicate>,
+        not_match_target_operations: &Vec<MergePredicate>,
+        operation_column_case: &Expr,
+        new_columns: Vec<(String, Expr)>,
+        predicate: &Expr, 
+        snapshot: &DeltaTableState,
+        state: &SessionState,
+        source: &LogicalPlan,
+        target_schema: &DFSchema,
+        target_provider: Arc<dyn TableSource>,
+        source_name: &TableReference,
+        target_name: &TableReference,
+        target_alias: Option<String>,
+        file_column: Arc<String>, 
+        should_cdc: bool,
+        write_projection_with_cdf: &Vec<Expr>,
+        write_projection: &Vec<Expr>,
+        generated_col_expressions: &Vec<crate::table::GeneratedColumn>,
+        missing_generated_columns: &[String],
+        table_partition_cols: &Vec<String>,
+        object_store: Arc<dyn ObjectStore>,
+        writer_properties: Option<WriterProperties>,
+        writer_stats_config: WriterStatsConfig,
+        streaming: bool,
+        mut metrics: MergeMetrics,
+    ) -> DeltaResult<(Vec<Action>, Instant, Option<Expr>, HashSet<String>, MergeMetrics, FileScope)>{
+        // Attempt to construct an early filter that we can apply to the Add action list and the delta scan.
+        // In the case where there are partition columns in the join predicate, we can scan the source table
+        // to get the distinct list of partitions affected and constrain the search to those.
+        let target_subset_filter: Option<Expr> = if !not_match_source_operations.is_empty() {
+            // It's only worth trying to create an early filter where there are no `when_not_matched_source` operators, since
+            // that implies a full scan
+            None
+        } else {
+            try_construct_early_filter(
+                predicate.clone(),
+                &snapshot,
+                &state,
+                &source,
+                &source_name,
+                &target_name,
+                streaming,
+            )
+            .await?
+        }
+        .map(|e| {
+            // simplify the expression so we have
+            let props = ExecutionProps::new();
+            let simplify_context = SimplifyContext::new(&props).with_schema(target_schema.clone().into());
+            let simplifier = ExprSimplifier::new(simplify_context).with_max_cycles(10);
+            simplifier.simplify(e).unwrap()
+        });
 
-    let merge_final = &projected.into_unoptimized_plan();
-    let write = state.create_physical_plan(merge_final).await?;
+        // Need to manually push this filter into the scan... We want to PRUNE files not FILTER RECORDS
+        let target = match &target_subset_filter {
+            Some(filter) => {
+                let filter = match &target_alias {
+                    Some(alias) => remove_table_alias(filter.clone(), alias),
+                    None => filter.clone(),
+                };
+                LogicalPlanBuilder::scan_with_filters(
+                    target_name.clone(),
+                    target_provider,
+                    None,
+                    vec![filter],
+                )?
+                .build()?
+            }
+            None => LogicalPlanBuilder::scan(target_name.clone(), target_provider, None)?.build()?,
+        };
 
-    let err = || DeltaTableError::Generic("Unable to locate expected metric node".into());
-    let source_count = find_metric_node(SOURCE_COUNT_ID, &write).ok_or_else(err)?;
-    let op_count = find_metric_node(OUTPUT_COUNT_ID, &write).ok_or_else(err)?;
-    let barrier = find_node::<MergeBarrierExec>(&write).ok_or_else(err)?;
-    let scan_count = find_node::<DeltaScan>(&write).ok_or_else(err)?;
+        let source = DataFrame::new(state.clone(), source.clone());
+        let source = source.with_column(SOURCE_COLUMN, lit(true))?;
 
-    let table_partition_cols = current_metadata.partition_columns.clone();
+        // Not match operations imply a full scan of the target table is required
+        let enable_pushdown =
+            not_match_source_operations.is_empty() && not_match_target_operations.is_empty();
+        let target = LogicalPlan::Extension(Extension {
+            node: Arc::new(MetricObserver {
+                id: TARGET_COUNT_ID.into(),
+                input: target,
+                enable_pushdown,
+            }),
+        });
 
-    let writer_stats_config = WriterStatsConfig::new(
-        snapshot.table_config().num_indexed_cols(),
-        snapshot
-            .table_config()
-            .stats_columns()
-            .map(|v| v.iter().map(|v| v.to_string()).collect::<Vec<String>>()),
-    );
+        let target = DataFrame::new(state.clone(), target);
+        let target = target.with_column(TARGET_COLUMN, lit(true))?;
+        let join = source.join(target, JoinType::Full, &[], &[], Some(predicate.clone()))?;
+        let projection = join.with_column(OPERATION_COLUMN, operation_column_case.clone())?;
 
-    let rewrite_start = Instant::now();
-    let mut actions: Vec<Action> = write_execution_plan_v2(
-        Some(&snapshot),
-        state.clone(),
-        write,
-        table_partition_cols.clone(),
-        log_store.object_store(Some(operation_id)),
-        Some(snapshot.table_config().target_file_size() as usize),
-        None,
-        writer_properties.clone(),
-        writer_stats_config.clone(),
-        None,
-        should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
-    )
-    .await?;
+        let new_columns = {
+            let plan = projection.into_unoptimized_plan();
+            let mut fields: Vec<Expr> = plan
+                .schema()
+                .columns()
+                .iter()
+                .map(|f| col(f.clone()))
+                .collect();
+    
+            fields.extend(new_columns.into_iter().map(|(name, ex)| ex.alias(name)));
+    
+            LogicalPlanBuilder::from(plan).project(fields)?.build()?
+        };
+    
+        let distribute_expr = col(file_column.as_str());
+        let merge_barrier = LogicalPlan::Extension(Extension {
+            node: Arc::new(MergeBarrier {
+                input: new_columns.clone(),
+                expr: distribute_expr,
+                file_column,
+            }),
+        });
+    
+
+        // We should observe the metrics before we union the merge plan with the cdf_merge plan
+        // so that we get the metrics only for the merge plan.
+        let operation_count = LogicalPlan::Extension(Extension {
+            node: Arc::new(MetricObserver {
+                id: OUTPUT_COUNT_ID.into(),
+                input: merge_barrier,
+                enable_pushdown: false,
+            }),
+        });
+
+        let operation_count = DataFrame::new(state.clone(), operation_count);
+
+
+        let mut projected = if should_cdc {
+            operation_count
+                .clone()
+                .with_column(
+                    CDC_COLUMN_NAME,
+                    when(col(TARGET_DELETE_COLUMN).is_null(), lit("delete")) // nulls are equal to True
+                        .when(col(DELETE_COLUMN).is_null(), lit("source_delete"))
+                        .when(col(TARGET_COPY_COLUMN).is_null(), lit("copy"))
+                        .when(col(TARGET_INSERT_COLUMN).is_null(), lit("insert"))
+                        .when(col(TARGET_UPDATE_COLUMN).is_null(), lit("update"))
+                        .end()?,
+                )?
+                .drop_columns(&["__delta_rs_path"])? // WEIRD bug caused by interaction with unnest_columns, has to be dropped otherwise throws schema error
+                .with_column(
+                    "__delta_rs_update_expanded",
+                    when(
+                        col(CDC_COLUMN_NAME).eq(lit("update")),
+                        lit(ScalarValue::List(ScalarValue::new_list(
+                            &[
+                                ScalarValue::Utf8(Some("update_preimage".into())),
+                                ScalarValue::Utf8(Some("update_postimage".into())),
+                            ],
+                            &DataType::List(Field::new("element", DataType::Utf8, false).into()),
+                            true,
+                        ))),
+                    )
+                    .end()?,
+                )?
+                .unnest_columns(&["__delta_rs_update_expanded"])?
+                .with_column(
+                    CDC_COLUMN_NAME,
+                    when(
+                        col(CDC_COLUMN_NAME).eq(lit("update")),
+                        col("__delta_rs_update_expanded"),
+                    )
+                    .otherwise(col(CDC_COLUMN_NAME))?,
+                )?
+                .drop_columns(&["__delta_rs_update_expanded"])?
+                .select(write_projection_with_cdf.clone())?
+        } else {
+            operation_count
+                .filter(col(DELETE_COLUMN).is_false())?
+                .select(write_projection.clone())?
+        };
+
+        projected = add_generated_columns(
+            projected,
+            generated_col_expressions,
+            missing_generated_columns,
+            &state,
+        )?;
+
+
+        let merge_final = &projected.into_unoptimized_plan();
+        let write = state.create_physical_plan(merge_final).await?;
+
+        let err = || DeltaTableError::Generic("Unable to locate expected metric node".into());
+        let source_count = find_metric_node(SOURCE_COUNT_ID, &write).ok_or_else(err)?;
+        let op_count = find_metric_node(OUTPUT_COUNT_ID, &write).ok_or_else(err)?;
+        let barrier = find_node::<MergeBarrierExec>(&write).ok_or_else(err)?;
+        let scan_count = find_node::<DeltaScan>(&write).ok_or_else(err)?;
+
+
+        let rewrite_start = Instant::now();
+        let actions: Vec<Action> = write_execution_plan_v2(
+            Some(&snapshot),
+            state.clone(),
+            write,
+            table_partition_cols.clone(),
+            object_store,
+            Some(snapshot.table_config().target_file_size() as usize),
+            None,
+            writer_properties.clone(),
+            writer_stats_config.clone(),
+            None,
+            should_cdc, // if true, write execution plan splits batches in [normal, cdc] data before writing
+        )
+        .await?;
+        let survivors = barrier
+            .as_any()
+            .downcast_ref::<MergeBarrierExec>()
+            .unwrap()
+            .survivors().lock().unwrap().clone();
+
+
+        let file_scope = scan_count
+            .as_any()
+            .downcast_ref::<DeltaScan>()
+            .unwrap().file_scope.clone();
+
+        let source_count_metrics = source_count.metrics().unwrap();
+        let target_count_metrics = op_count.metrics().unwrap();
+
+        metrics.num_source_rows += get_metric(&source_count_metrics, SOURCE_COUNT_METRIC);
+        metrics.num_target_rows_inserted += get_metric(&target_count_metrics, TARGET_INSERTED_METRIC);
+        metrics.num_target_rows_updated += get_metric(&target_count_metrics, TARGET_UPDATED_METRIC);
+        metrics.num_target_rows_deleted += get_metric(&target_count_metrics, TARGET_DELETED_METRIC);
+        metrics.num_target_rows_copied += get_metric(&target_count_metrics, TARGET_COPY_METRIC);
+
+        Ok((actions, rewrite_start, target_subset_filter, survivors, metrics, file_scope))
+
+    }
+
+
+    // Predicate will be used for conflict detection
+    let commit_predicate = match target_subset_filter.clone() {
+        None => None, // No predicate means it's a full table merge
+        Some(some_filter) => {
+            let predict_expr = match &target_alias.clone() {
+                None => some_filter,
+                Some(alias) => remove_table_alias(some_filter, alias),
+            };
+            Some(fmt_expr_to_sql(&predict_expr)?)
+        }
+    };
+
+    for action in snapshot.log_data() {
+        if survivors.contains(action.path().as_ref()) {
+            metrics.num_target_files_removed += 1;
+            actions.push(action.remove_action(true).into());
+        }
+    }
+
+    debug!("Used target subset filter: {:?}", commit_predicate);
+
     if let Some(schema_metadata) = schema_action {
         actions.push(schema_metadata);
     }
@@ -1396,36 +1584,11 @@ async fn execute(
     metrics.rewrite_time_ms = Instant::now().duration_since(rewrite_start).as_millis() as u64;
     metrics.num_target_files_added = actions.len();
 
-    let survivors = barrier
-        .as_any()
-        .downcast_ref::<MergeBarrierExec>()
-        .unwrap()
-        .survivors();
 
-    {
-        let lock = survivors.lock().unwrap();
-        for action in snapshot.log_data() {
-            if lock.contains(action.path().as_ref()) {
-                metrics.num_target_files_removed += 1;
-                actions.push(action.remove_action(true).into());
-            }
-        }
-    }
-
-    let source_count_metrics = source_count.metrics().unwrap();
-    let target_count_metrics = op_count.metrics().unwrap();
-    let scan_count_metrics = scan_count.metrics().unwrap();
-
-    metrics.num_source_rows = get_metric(&source_count_metrics, SOURCE_COUNT_METRIC);
-    metrics.num_target_rows_inserted = get_metric(&target_count_metrics, TARGET_INSERTED_METRIC);
-    metrics.num_target_rows_updated = get_metric(&target_count_metrics, TARGET_UPDATED_METRIC);
-    metrics.num_target_rows_deleted = get_metric(&target_count_metrics, TARGET_DELETED_METRIC);
-    metrics.num_target_rows_copied = get_metric(&target_count_metrics, TARGET_COPY_METRIC);
     metrics.num_output_rows = metrics.num_target_rows_inserted
         + metrics.num_target_rows_updated
         + metrics.num_target_rows_copied;
-    metrics.num_target_files_scanned = get_metric(&scan_count_metrics, "files_scanned");
-    metrics.num_target_files_skipped_during_scan = get_metric(&scan_count_metrics, "files_pruned");
+
     metrics.execution_time_ms = Instant::now().duration_since(exec_start).as_millis() as u64;
 
     let app_metadata = &mut commit_properties.app_metadata;

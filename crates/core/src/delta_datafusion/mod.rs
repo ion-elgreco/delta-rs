@@ -561,6 +561,8 @@ impl<'a> DeltaScanBuilder<'a> {
         });
 
         // Perform Pruning of files to scan
+        let mut file_scope = FileScope::default();
+
         let (files, files_scanned, files_pruned) = match self.files {
             Some(files) => {
                 let files = files.to_owned();
@@ -579,8 +581,10 @@ impl<'a> DeltaScanBuilder<'a> {
                         .zip(files_to_prune.into_iter())
                         .filter_map(|(action, keep)| {
                             if keep {
+                                file_scope.scanned.insert(action.path.clone());
                                 Some(action.to_owned())
                             } else {
+                                file_scope.skipped.insert(action.path);
                                 files_pruned += 1;
                                 None
                             }
@@ -706,6 +710,7 @@ impl<'a> DeltaScanBuilder<'a> {
             config,
             logical_schema,
             metrics,
+            file_scope,
         })
     }
 }
@@ -960,6 +965,11 @@ impl TableProvider for LazyTableProvider {
         None
     }
 }
+#[derive(Clone, Debug, Default)]
+pub struct FileScope {
+    pub scanned: HashSet<String>,
+    pub skipped: HashSet<String>,
+}
 
 // TODO: this will likely also need to perform column mapping later when we support reader protocol v2
 /// A wrapper for parquet scans
@@ -975,6 +985,8 @@ pub struct DeltaScan {
     pub logical_schema: Arc<ArrowSchema>,
     /// Metrics for scan reported via DataFusion
     metrics: ExecutionPlanMetricsSet,
+    /// 
+    pub file_scope: FileScope
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1027,6 +1039,7 @@ impl ExecutionPlan for DeltaScan {
             parquet_scan: children[0].clone(),
             logical_schema: self.logical_schema.clone(),
             metrics: self.metrics.clone(),
+            file_scope: self.file_scope.clone(),
         }))
     }
 
@@ -1058,6 +1071,7 @@ impl ExecutionPlan for DeltaScan {
                 parquet_scan,
                 logical_schema: self.logical_schema.clone(),
                 metrics: self.metrics.clone(),
+                file_scope: self.file_scope.clone()
             })))
         } else {
             Ok(None)
@@ -1484,6 +1498,7 @@ impl PhysicalExtensionCodec for DeltaPhysicalCodec {
             config: wire.config,
             logical_schema: wire.logical_schema,
             metrics: ExecutionPlanMetricsSet::new(),
+            file_scope: FileScope::default(),
         };
         Ok(Arc::new(delta_scan))
     }
@@ -2247,6 +2262,7 @@ mod tests {
             config: DeltaScanConfig::default(),
             logical_schema: schema.clone(),
             metrics: ExecutionPlanMetricsSet::new(),
+            file_scope: FileScope::default(),
         });
         let proto: protobuf::PhysicalPlanNode =
             protobuf::PhysicalPlanNode::try_from_physical_plan(exec_plan.clone(), &codec)
