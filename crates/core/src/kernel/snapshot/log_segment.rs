@@ -371,7 +371,7 @@ impl LogSegment {
             let bytes = commit.get_bytes()?;
             let meta = ObjectMeta {
                 location: path,
-                size: bytes.len(),
+                size: bytes.len() as u64,
                 last_modified: Utc::now(),
                 e_tag: None,
                 version: None,

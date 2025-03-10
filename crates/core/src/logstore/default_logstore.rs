@@ -5,7 +5,7 @@ use std::sync::{Arc, OnceLock};
 use bytes::Bytes;
 use object_store::{Attributes, Error as ObjectStoreError, ObjectStore, PutOptions, TagSet};
 use uuid::Uuid;
-
+use http;
 use super::{CommitOrBytes, LogStore, LogStoreConfig};
 use crate::{
     operations::transaction::TransactionError,
@@ -19,6 +19,7 @@ fn put_options() -> &'static PutOptions {
         mode: object_store::PutMode::Create, // Creates if file doesn't exists yet
         tags: TagSet::default(),
         attributes: Attributes::default(),
+        extensions: http::Extensions::default(),
     })
 }
 

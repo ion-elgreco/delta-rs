@@ -198,7 +198,7 @@ impl ObjectStore for FileStorageBackend {
     async fn get_range(
         &self,
         location: &ObjectStorePath,
-        range: Range<usize>,
+        range: Range<u64>,
     ) -> ObjectStoreResult<Bytes> {
         self.inner.get_range(location, range).await
     }
@@ -214,7 +214,7 @@ impl ObjectStore for FileStorageBackend {
     fn list(
         &self,
         prefix: Option<&ObjectStorePath>,
-    ) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
+    ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         self.inner.list(prefix)
     }
 
@@ -222,7 +222,7 @@ impl ObjectStore for FileStorageBackend {
         &self,
         prefix: Option<&ObjectStorePath>,
         offset: &ObjectStorePath,
-    ) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
+    ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         self.inner.list_with_offset(prefix, offset)
     }
 

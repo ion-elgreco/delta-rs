@@ -234,7 +234,7 @@ impl ObjectStore for DeltaIOStorageBackend {
         .await
     }
 
-    async fn get_range(&self, location: &Path, range: Range<usize>) -> ObjectStoreResult<Bytes> {
+    async fn get_range(&self, location: &Path, range: Range<u64>) -> ObjectStoreResult<Bytes> {
         self.spawn_io_rt(
             |store, path| store.get_range(path, range),
             &self.inner,
@@ -261,7 +261,7 @@ impl ObjectStore for DeltaIOStorageBackend {
         .await
     }
 
-    fn list(&self, prefix: Option<&Path>) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         self.inner.list(prefix)
     }
 
@@ -269,7 +269,7 @@ impl ObjectStore for DeltaIOStorageBackend {
         &self,
         prefix: Option<&Path>,
         offset: &Path,
-    ) -> BoxStream<'_, ObjectStoreResult<ObjectMeta>> {
+    ) -> BoxStream<'static, ObjectStoreResult<ObjectMeta>> {
         self.inner.list_with_offset(prefix, offset)
     }
 
