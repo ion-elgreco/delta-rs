@@ -805,12 +805,15 @@ impl UnityCatalog {
         table_name: impl AsRef<str>,
     ) -> Result<TableTempCredentialsResponse, UnityCatalogError> {
         let token = self.get_credential().await?;
+        dbg!(&token);
         let table_info = self
             .get_table(catalog_id, database_name, table_name)
             .await?;
+        dbg!(&table_info);
         let response = match table_info {
             GetTableResponse::Success(table) => {
                 let request = TemporaryTableCredentialsRequest::new(&table.table_id, "READ");
+                dbg!(&request);
                 Ok(self
                     .client
                     .post(format!(
@@ -820,7 +823,8 @@ impl UnityCatalog {
                     .header(AUTHORIZATION, token)
                     .json(&request)
                     .send()
-                    .await?)
+                    .await
+                    .unwrap())
             }
             GetTableResponse::Error(err) => Err(UnityCatalogError::InvalidTable {
                 error_code: err.error_code,
