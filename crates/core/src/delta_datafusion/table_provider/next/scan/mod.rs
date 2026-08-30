@@ -37,6 +37,7 @@ use datafusion::{
     datasource::physical_plan::{ParquetSource, parquet::CachedParquetFileReaderFactory},
     error::DataFusionError,
     execution::object_store::ObjectStoreUrl,
+    physical_expr::Partitioning,
     physical_plan::{
         ExecutionPlan,
         empty::EmptyExec,
@@ -87,6 +88,13 @@ mod replay;
 
 type ScanMetadataStream = Pin<Box<dyn Stream<Item = Result<ScanMetadata, DeltaTableError>> + Send>>;
 type PublicFileIdMap = HashMap<String, String>;
+pub(crate) type PhysicalFileIdentityMap = HashMap<String, PhysicalFileIdentity>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PhysicalFileIdentity {
+    object_store_url: ObjectStoreUrl,
+    location: Path,
+}
 
 struct ReplayedScanFiles {
     files: Vec<ScanFileContext>,
@@ -409,7 +417,22 @@ async fn get_data_scan_plan(
         public_file_ids,
         metrics,
     } = replayed;
+    let has_deletion_vectors = !dvs.is_empty();
     let mut partition_stats = HashMap::new();
+
+    let physical_file_identities = files
+        .iter()
+        .enumerate()
+        .map(|(file_index, file)| {
+            Ok((
+                compact_internal_file_id(file_index),
+                PhysicalFileIdentity {
+                    object_store_url: file.file_url.as_object_store_url(),
+                    location: Path::from_url_path(file.file_url.path())?,
+                },
+            ))
+        })
+        .try_collect::<_, PhysicalFileIdentityMap, DataFusionError>()?;
 
     // Convert files into DataFusion `PartitionedFile`s grouped by object store.
     // Create one `DataSourceExec` plan for each store.
@@ -454,20 +477,23 @@ async fn get_data_scan_plan(
     // TODO(roeap); not sure exactly how row tracking is implemented in kernel right now
     // so leaving predicate as None for now until we are sure this is safe to do.
     let table_config = scan_plan.table_configuration();
-    let predicate = if table_config.is_feature_enabled(&TableFeature::RowTracking) {
-        None
-    } else {
-        scan_plan.parquet_predicate.as_ref()
-    };
+    let predicate =
+        if table_config.is_feature_enabled(&TableFeature::RowTracking) || has_deletion_vectors {
+            None
+        } else {
+            scan_plan.parquet_predicate.as_ref()
+        };
+    let parquet_limit = if has_deletion_vectors { None } else { limit };
     let file_id_field = scan_plan.contract.file_id_field.clone();
     let pq_plan = get_read_plan(
         session,
         files_by_store,
         &scan_plan.parquet_read_schema,
         &scan_plan.parquet_predicate_schema,
-        limit,
+        parquet_limit,
         &file_id_field,
         predicate,
+        has_deletion_vectors,
     )
     .await?;
 
@@ -480,6 +506,7 @@ async fn get_data_scan_plan(
         Arc::clone(&transforms),
         Arc::clone(&dvs),
         Arc::clone(&public_file_ids),
+        Arc::new(physical_file_identities),
         partition_stats,
         metrics,
     );
@@ -640,6 +667,13 @@ fn partitioned_files_to_file_groups_with_limit(
     file_groups
 }
 
+fn lock_dv_file_group_layout(
+    builder: FileScanConfigBuilder,
+    file_group_count: usize,
+) -> FileScanConfigBuilder {
+    builder.with_output_partitioning(Some(Partitioning::UnknownPartitioning(file_group_count)))
+}
+
 async fn get_read_plan(
     state: &dyn Session,
     files_by_store: impl IntoIterator<Item = FilesByStore>,
@@ -654,6 +688,7 @@ async fn get_read_plan(
     limit: Option<usize>,
     file_id_field: &FieldRef,
     predicate: Option<&Expr>,
+    has_deletion_vectors: bool,
 ) -> Result<Arc<dyn ExecutionPlan>> {
     let mut plans = Vec::new();
 
@@ -692,8 +727,7 @@ async fn get_read_plan(
         // TODO(roeap); we might be able to also push selection vectors into the read plan
         // by creating parquet access plans. However we need to make sure this does not
         // interfere with other delta features like row ids.
-        let has_selection_vectors = files.iter().any(|(_, sv)| sv.is_some());
-        if !has_selection_vectors && let Some(pred) = predicate {
+        if !has_deletion_vectors && let Some(pred) = predicate {
             match state.create_physical_expr(pred.clone(), &parquet_predicate_df_schema) {
                 Ok(physical) => match adapter_factory
                     .create(parquet_predicate_schema.clone(), full_read_schema.clone())
@@ -737,12 +771,18 @@ async fn get_read_plan(
         let (file_groups, statistics) =
             compute_all_files_statistics(file_groups, full_table_schema, true, false)?;
 
-        let config = FileScanConfigBuilder::new(store_url, Arc::new(file_source))
+        let file_group_count = file_groups.len();
+        let builder = FileScanConfigBuilder::new(store_url, Arc::new(file_source))
             .with_file_groups(file_groups)
             .with_statistics(statistics)
-            .with_limit(limit)
-            .with_expr_adapter(Some(adapter_factory.clone() as _))
-            .build();
+            .with_limit(if has_deletion_vectors { None } else { limit })
+            .with_expr_adapter(Some(adapter_factory.clone() as _));
+        let builder = if has_deletion_vectors {
+            lock_dv_file_group_layout(builder, file_group_count)
+        } else {
+            builder
+        };
+        let config = builder.build();
 
         plans.push(DataSourceExec::from_data_source(config) as Arc<dyn ExecutionPlan>);
     }
@@ -1381,6 +1421,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1404,6 +1445,7 @@ mod tests {
             Some(1),
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1432,6 +1474,7 @@ mod tests {
             Some(1),
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1509,6 +1552,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1547,6 +1591,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1740,6 +1785,7 @@ mod tests {
             None,
             &file_id_field,
             None,
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1807,6 +1853,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1873,6 +1920,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -1952,6 +2000,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2028,6 +2077,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2105,6 +2155,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
@@ -2194,6 +2245,7 @@ mod tests {
             None,
             &file_id_field,
             Some(&predicate),
+            false,
         )
         .await?;
         let batches = collect(plan, session.task_ctx()).await?;
