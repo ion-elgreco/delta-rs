@@ -322,6 +322,18 @@ pub enum CommitOrBytes {
     LogBytes(Bytes),
 }
 
+/// Ratified commits a catalog knows about that may not be published to `_delta_log` yet.
+///
+/// Returned by [`LogStore::log_tail`] for catalog-managed tables and handed to the kernel
+/// snapshot builder so that log replay sees every ratified version.
+#[derive(Debug, Clone)]
+pub struct LogTail {
+    /// Ratified commit files, in version order.
+    pub commits: Vec<delta_kernel::LogPath>,
+    /// The highest version the catalog has ratified.
+    pub max_catalog_version: Version,
+}
+
 /// Configuration parameters for a log store
 #[derive(Debug, Clone)]
 pub struct LogStoreConfig {
@@ -379,7 +391,8 @@ impl LogStoreConfig {
 /// Two seams let backends customise how an operation writes:
 ///
 /// - [`LogStore::committer`] returns the commit authority. Filesystem-backed stores return a
-///   [`FileSystemCommitter`].
+///   [`FileSystemCommitter`]; a catalog that ratifies commits returns its own committer and
+///   supplies ratified commits through [`LogStore::log_tail`].
 /// - [`LogStore::begin_operation`] returns an [`OperationContext`] when every write of one
 ///   operation must be isolated (for example on a LakeFS transaction branch). Core wraps the
 ///   context and routes writes to it; the backend never sees an operation id.
@@ -429,6 +442,11 @@ pub trait LogStore: Send + Sync + AsAny {
     /// wraps it, routes all writes of the operation to it, and ends it through
     /// [`OperationTransaction::finish`] or [`OperationTransaction::abort`].
     async fn begin_operation(&self) -> DeltaResult<Option<OperationContext>> {
+        Ok(None)
+    }
+
+    /// Catalog-provided log tail for catalog-managed tables. `None` for every other table.
+    async fn log_tail(&self) -> DeltaResult<Option<LogTail>> {
         Ok(None)
     }
 
@@ -568,6 +586,10 @@ impl<T: LogStore + ?Sized> LogStore for Arc<T> {
 
     async fn begin_operation(&self) -> DeltaResult<Option<OperationContext>> {
         T::begin_operation(self).await
+    }
+
+    async fn log_tail(&self) -> DeltaResult<Option<LogTail>> {
+        T::log_tail(self).await
     }
 
     fn to_uri(&self, location: &Path) -> String {
@@ -795,6 +817,10 @@ pub async fn get_latest_version(
     log_store: &dyn LogStore,
     current_version: Version,
 ) -> DeltaResult<Version> {
+    if let Some(tail) = log_store.log_tail().await? {
+        // The catalog is the authority for ratified versions of a catalog-managed table.
+        return Ok(tail.max_catalog_version);
+    }
     let storage = log_store.engine().storage_handler();
     let log_root = log_store.log_root_url();
 
@@ -938,6 +964,119 @@ pub async fn abort_commit_entry(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::Arc as StdArc;
+
+    use delta_kernel::{FileMeta, LogPath};
+
+    use crate::DeltaTable;
+    use crate::kernel::{DataType, EagerSnapshot, PrimitiveType, Snapshot, StructField};
+
+    /// A store that wraps another one and reports what a catalog has ratified.
+    struct CatalogTailStore {
+        inner: LogStoreRef,
+        tail: LogTail,
+    }
+
+    #[async_trait::async_trait]
+    impl LogStore for CatalogTailStore {
+        fn name(&self) -> String {
+            self.inner.name()
+        }
+
+        async fn read_commit_entry(&self, version: Version) -> DeltaResult<Option<Bytes>> {
+            self.inner.read_commit_entry(version).await
+        }
+
+        async fn get_latest_version(&self, start_version: Version) -> DeltaResult<Version> {
+            get_latest_version(self, start_version).await
+        }
+
+        fn object_store(&self) -> StdArc<dyn ObjectStore> {
+            self.inner.object_store()
+        }
+
+        fn root_object_store(&self) -> StdArc<dyn ObjectStore> {
+            self.inner.root_object_store()
+        }
+
+        fn committer(&self) -> StdArc<dyn Committer> {
+            self.inner.committer()
+        }
+
+        async fn log_tail(&self) -> DeltaResult<Option<LogTail>> {
+            Ok(Some(self.tail.clone()))
+        }
+
+        fn config(&self) -> &LogStoreConfig {
+            self.inner.config()
+        }
+    }
+
+    async fn ratified_commit(log_store: &dyn LogStore, version: Version) -> LogPath {
+        let path = commit_uri_from_version(Some(version));
+        let meta = log_store.object_store().head(&path).await.unwrap();
+        let location = log_store
+            .log_root_url()
+            .join(&path.filename().unwrap().to_string())
+            .unwrap();
+        LogPath::try_new(FileMeta {
+            location,
+            last_modified: meta.last_modified.timestamp_millis(),
+            size: meta.size,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn catalog_log_tail_reaches_the_kernel_and_bounds_the_latest_version() {
+        // Versions 0 and 1 exist in the log; the catalog has ratified version 0 only.
+        let table = DeltaTable::new_in_memory()
+            .create()
+            .with_columns(vec![StructField::new(
+                "id",
+                DataType::Primitive(PrimitiveType::Integer),
+                true,
+            )])
+            .await
+            .unwrap();
+        let table = table
+            .add_columns()
+            .with_fields(vec![StructField::new(
+                "extra",
+                DataType::Primitive(PrimitiveType::String),
+                true,
+            )])
+            .await
+            .unwrap();
+        assert_eq!(table.version(), Some(1));
+        let inner = table.log_store();
+        let store = CatalogTailStore {
+            inner: inner.clone(),
+            tail: LogTail {
+                commits: vec![ratified_commit(inner.as_ref(), 0).await],
+                max_catalog_version: 0,
+            },
+        };
+
+        // The catalog, not the log listing, decides the latest version.
+        assert_eq!(store.get_latest_version(0).await.unwrap(), 0);
+
+        // The tail is handed to the kernel builder on load and on update. This table does
+        // not carry the catalogManaged feature, so the kernel rejects the catalog version;
+        // that proves the plumbing without a catalog-managed fixture, which delta-rs cannot
+        // write yet.
+        let err = Snapshot::try_new(&store, Default::default(), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("catalog-managed"), "{err}");
+
+        let mut eager = EagerSnapshot::try_new(inner.as_ref(), Default::default(), Some(0))
+            .await
+            .unwrap();
+        let err = eager.update(&store, None).await.unwrap_err();
+        assert!(err.to_string().contains("catalog-managed"), "{err}");
+    }
+
     use futures::TryStreamExt;
     use pretty_assertions::assert_eq;
 

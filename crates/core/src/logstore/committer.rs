@@ -5,7 +5,9 @@
 //! committer to commit it, and owns the retry and conflict-resolution loop. A committer must not
 //! retry on its own: for an operation-scoped store a retry against stale state would be wrong.
 //!
-//! The trait mirrors `delta_kernel::committer::Committer`.
+//! The trait mirrors `delta_kernel::committer::Committer`. A catalog that ratifies commits
+//! implements this trait today and moves behind a thin adapter once the main commit path runs
+//! through kernel transactions.
 
 use std::sync::{Arc, OnceLock};
 
@@ -14,9 +16,9 @@ use tracing::*;
 
 use super::CommitOrBytes;
 use super::storage::utils::commit_uri_from_version;
-use crate::DeltaTableError;
 use crate::kernel::Version;
 use crate::kernel::transaction::TransactionError;
+use crate::{DeltaResult, DeltaTableError};
 
 /// How a caller must prepare the payload it hands to [`Committer::commit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +63,17 @@ pub trait Committer: Send + Sync {
 
     /// How the caller must prepare the payload.
     fn payload_kind(&self) -> PayloadKind;
+
+    /// `true` when a catalog ratifies commits and the log may lag behind the catalog.
+    fn is_catalog_committer(&self) -> bool {
+        false
+    }
+
+    /// Publish ratified commits up to `version` into the `_delta_log` directory. Checkpoints and
+    /// log compaction operate on published versions only. No-op for filesystem committers.
+    async fn publish(&self, _version: Version) -> DeltaResult<()> {
+        Ok(())
+    }
 }
 
 /// How a [`FileSystemCommitter`] writes the commit file.

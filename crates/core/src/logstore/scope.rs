@@ -33,7 +33,7 @@ use tracing::*;
 use url::Url;
 
 use super::committer::{CommitResponse, Committer, PayloadKind};
-use super::{CommitOrBytes, LogStore, LogStoreConfig, LogStoreRef};
+use super::{CommitOrBytes, LogStore, LogStoreConfig, LogStoreRef, LogTail};
 use crate::kernel::Version;
 use crate::kernel::transaction::TransactionError;
 use crate::{DeltaResult, DeltaTableError};
@@ -281,12 +281,21 @@ impl Committer for ScopedCommitter {
     fn payload_kind(&self) -> PayloadKind {
         self.inner.payload_kind()
     }
+
+    fn is_catalog_committer(&self) -> bool {
+        self.inner.is_catalog_committer()
+    }
+
+    async fn publish(&self, version: Version) -> DeltaResult<()> {
+        self.state.ensure_open()?;
+        self.inner.publish(version).await
+    }
 }
 
 /// Crate-private adapter over a parent store and an [`OperationContext`].
 ///
 /// Log reads (`read_commit_entry`, `get_latest_version`, `refresh`, `config`, `root_url`,
-/// `object_store_url`) go to the parent. Writes (`object_store`,
+/// `object_store_url`, `log_tail`) go to the parent. Writes (`object_store`,
 /// `root_object_store`, `engine`, `write_root_url`, `committer`) go to the context.
 /// `begin_operation` forwards to the parent so that post-commit work can open a sibling scope.
 /// After the scope is finished or aborted every write-side handle returns [`ScopeClosed`].
@@ -368,6 +377,10 @@ impl LogStore for ScopedLogStore {
 
     async fn begin_operation(&self) -> DeltaResult<Option<OperationContext>> {
         self.parent.begin_operation().await
+    }
+
+    async fn log_tail(&self) -> DeltaResult<Option<LogTail>> {
+        self.parent.log_tail().await
     }
 
     async fn is_delta_table_location(&self) -> DeltaResult<bool> {

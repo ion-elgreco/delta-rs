@@ -45,7 +45,7 @@ use super::{Action, CommitInfo, Metadata, Protocol};
 use crate::checkpoints::parse_last_checkpoint_hint;
 use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, rb_from_scan_meta};
 use crate::kernel::{ARROW_HANDLER, StructType, spawn_blocking_with_span};
-use crate::logstore::{LogStore, LogStoreExt};
+use crate::logstore::{LogStore, LogStoreExt, LogTail};
 use crate::{DeltaResult, DeltaTableConfig, DeltaTableError};
 
 pub use self::log_data::*;
@@ -229,10 +229,27 @@ impl Snapshot {
         config: DeltaTableConfig,
         version: Option<Version>,
     ) -> DeltaResult<Self> {
+        Self::try_new_with_engine_and_log_tail(engine, table_root, config, version, None).await
+    }
+
+    /// Build a snapshot like [`Snapshot::try_new_with_engine`], with the ratified commits a
+    /// catalog supplied through [`LogStore::log_tail`].
+    pub(crate) async fn try_new_with_engine_and_log_tail(
+        engine: Arc<dyn Engine>,
+        table_root: Url,
+        config: DeltaTableConfig,
+        version: Option<Version>,
+        log_tail: Option<LogTail>,
+    ) -> DeltaResult<Self> {
         let snapshot = match spawn_blocking_with_span(move || {
             let mut builder = KernelSnapshot::builder_for(table_root);
             if let Some(version) = version {
                 builder = builder.at_version(version);
+            }
+            if let Some(tail) = log_tail {
+                builder = builder
+                    .with_log_tail(tail.commits)
+                    .with_max_catalog_version(tail.max_catalog_version);
             }
             builder.build(engine.as_ref())
         })
@@ -264,6 +281,7 @@ impl Snapshot {
         version: Option<Version>,
     ) -> DeltaResult<Self> {
         let engine = log_store.engine();
+        let log_tail = log_store.log_tail().await?;
 
         // NB: kernel engine uses Url::join to construct paths,
         // if the path does not end with a slash, the would override the entire path.
@@ -273,7 +291,7 @@ impl Snapshot {
             table_root.set_path(&format!("{}/", table_root.path()));
         }
 
-        Self::try_new_with_engine(engine, table_root, config, version).await
+        Self::try_new_with_engine_and_log_tail(engine, table_root, config, version, log_tail).await
     }
 
     /// Create a [`ScanBuilder`] borrowing this snapshot to configure a read of the table.
@@ -291,6 +309,18 @@ impl Snapshot {
         self: Arc<Self>,
         engine: Arc<dyn Engine>,
         target_version: Option<Version>,
+    ) -> DeltaResult<Arc<Self>> {
+        self.update_with_log_tail(engine, target_version, None)
+            .await
+    }
+
+    /// Update the snapshot like [`Snapshot::update`], with the ratified commits a catalog
+    /// supplied through [`LogStore::log_tail`].
+    pub(crate) async fn update_with_log_tail(
+        self: Arc<Self>,
+        engine: Arc<dyn Engine>,
+        target_version: Option<Version>,
+        log_tail: Option<LogTail>,
     ) -> DeltaResult<Arc<Self>> {
         let current_version = self.version();
         if let Some(version) = target_version {
@@ -316,6 +346,11 @@ impl Snapshot {
             let mut builder = KernelSnapshot::builder_from(current);
             if let Some(version) = target_version {
                 builder = builder.at_version(version);
+            }
+            if let Some(tail) = log_tail {
+                builder = builder
+                    .with_log_tail(tail.commits)
+                    .with_max_catalog_version(tail.max_catalog_version);
             }
             builder.build(task_engine.as_ref())
         })
@@ -1384,9 +1419,10 @@ impl EagerSnapshot {
         target_version: Option<Version>,
     ) -> DeltaResult<()> {
         let previous_snapshot = self.snapshot.clone();
+        let log_tail = log_store.log_tail().await?;
         let updated_snapshot = previous_snapshot
             .clone()
-            .update(log_store.engine(), target_version)
+            .update_with_log_tail(log_store.engine(), target_version, log_tail)
             .await?;
         if Arc::ptr_eq(&updated_snapshot, &previous_snapshot) {
             return Ok(());

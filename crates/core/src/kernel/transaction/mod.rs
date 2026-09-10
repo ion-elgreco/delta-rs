@@ -1035,6 +1035,13 @@ pub struct PostCommit {
 impl PostCommit {
     /// Runs the post commit activities
     async fn run_post_commit_hook(&self) -> DeltaResult<(DeltaTableState, PostCommitMetrics)> {
+        // A catalog committer ratifies a version before the log contains it. Publish first,
+        // because checkpoints and log cleanup operate on published versions only.
+        let committer = self.log_store.committer();
+        if committer.is_catalog_committer() {
+            committer.publish(self.version).await?;
+        }
+
         if let Some(table) = &self.table_data {
             let mut snapshot = table.eager_snapshot().clone();
             if self.version != snapshot.version() {
