@@ -145,12 +145,16 @@ impl DisplayAs for MergeValidationExec {
     }
 }
 
-#[derive(Default)]
-struct TargetMatchState {
-    matched_action_count: i32,
-    unconditional_delete_count: i32,
-    emitted_winner: bool,
-    buffered_noop: Option<RecordBatch>,
+/// Flags of the match state of one target row.
+mod target_match {
+    /// A source row matched with a clause that changes the target row
+    pub(super) const ACTION: u8 = 1;
+    /// A source row matched with an unconditional delete clause
+    pub(super) const UNCONDITIONAL_DELETE: u8 = 1 << 1;
+    /// A match of the target row was passed on
+    pub(super) const EMITTED_WINNER: u8 = 1 << 2;
+    /// A match without an action is buffered, in case no other match is passed on
+    pub(super) const BUFFERED_NOOP: u8 = 1 << 3;
 }
 
 struct MergeValidationStream {
@@ -160,7 +164,10 @@ struct MergeValidationStream {
     row_ordinal_column: Arc<String>,
     file_id_by_path: HashMap<String, usize>,
     file_paths: Vec<String>,
-    target_row_state: HashMap<(usize, u64), TargetMatchState>,
+    /// Match state flags of each target row, by file id and row ordinal in the file. A file
+    /// with a match is read whole, so one byte per row stays small next to the rows.
+    target_row_state: Vec<Vec<u8>>,
+    buffered_noops: HashMap<(usize, u64), RecordBatch>,
     buffered_noop_order: Vec<(usize, u64)>,
     pending_output: VecDeque<RecordBatch>,
 }
@@ -179,7 +186,8 @@ impl MergeValidationStream {
             row_ordinal_column,
             file_id_by_path: HashMap::new(),
             file_paths: Vec::new(),
-            target_row_state: HashMap::new(),
+            target_row_state: Vec::new(),
+            buffered_noops: HashMap::new(),
             buffered_noop_order: Vec::new(),
             pending_output: VecDeque::new(),
         }
@@ -193,8 +201,18 @@ impl MergeValidationStream {
             let file_path = file_path.to_string();
             self.file_id_by_path.insert(file_path.clone(), file_id);
             self.file_paths.push(file_path);
+            self.target_row_state.push(Vec::new());
             file_id
         }
+    }
+
+    fn target_row_state(&mut self, file_id: usize, row_ordinal: u64) -> &mut u8 {
+        let states = &mut self.target_row_state[file_id];
+        let row = row_ordinal as usize;
+        if row >= states.len() {
+            states.resize(row + 1, 0);
+        }
+        &mut states[row]
     }
 
     fn validate_batch(&mut self, batch: &RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
@@ -268,19 +286,24 @@ impl MergeValidationStream {
             keep_mask[row] = false;
             let row_ordinal = row_ordinal_array.value(row);
             let key = (file_id, row_ordinal);
-            let state = self.target_row_state.entry(key).or_default();
+            let state = self.target_row_state(file_id, row_ordinal);
 
-            if cardinality_class == MatchParticipationClass::MatchedAction as i32 {
-                state.matched_action_count += 1;
+            let duplicate = if cardinality_class == MatchParticipationClass::MatchedAction as i32 {
+                let duplicate =
+                    *state & (target_match::ACTION | target_match::UNCONDITIONAL_DELETE);
+                *state |= target_match::ACTION;
+                duplicate != 0
             } else if cardinality_class
                 == MatchParticipationClass::MatchedUnconditionalDelete as i32
             {
-                state.unconditional_delete_count += 1;
-            }
+                let duplicate = *state & target_match::ACTION;
+                *state |= target_match::UNCONDITIONAL_DELETE;
+                duplicate != 0
+            } else {
+                false
+            };
 
-            if state.matched_action_count > 1
-                || (state.matched_action_count > 0 && state.unconditional_delete_count > 0)
-            {
+            if duplicate {
                 let file_path = self.file_paths[file_id].as_str();
                 return Err(DataFusionError::External(Box::new(
                     DeltaTableError::Generic(format!(
@@ -290,14 +313,21 @@ impl MergeValidationStream {
                 )));
             }
 
+            if *state & target_match::EMITTED_WINNER != 0 {
+                continue;
+            }
             if cardinality_class == MatchParticipationClass::MatchedNoop as i32 {
-                if !state.emitted_winner && state.buffered_noop.is_none() {
-                    state.buffered_noop = Some(take_row(batch, row)?);
+                if *state & target_match::BUFFERED_NOOP == 0 {
+                    *state |= target_match::BUFFERED_NOOP;
+                    self.buffered_noops.insert(key, take_row(batch, row)?);
                     self.buffered_noop_order.push(key);
                 }
-            } else if !state.emitted_winner {
-                state.emitted_winner = true;
-                state.buffered_noop = None;
+            } else {
+                let buffered_noop = *state & target_match::BUFFERED_NOOP != 0;
+                *state = (*state | target_match::EMITTED_WINNER) & !target_match::BUFFERED_NOOP;
+                if buffered_noop {
+                    self.buffered_noops.remove(&key);
+                }
                 keep_mask[row] = true;
             }
         }
@@ -315,11 +345,9 @@ impl MergeValidationStream {
     }
 
     fn queue_buffered_noops(&mut self) {
+        // A buffered match is removed when another match of its target row is passed on.
         for key in self.buffered_noop_order.drain(..) {
-            if let Some(state) = self.target_row_state.get_mut(&key)
-                && !state.emitted_winner
-                && let Some(batch) = state.buffered_noop.take()
-            {
+            if let Some(batch) = self.buffered_noops.remove(&key) {
                 self.pending_output.push_back(batch);
             }
         }
@@ -689,9 +717,8 @@ mod tests {
 
         s.validate_batch(&b).expect("ignore rows pass validation");
 
-        assert_eq!(
-            s.target_row_state.len(),
-            0,
+        assert!(
+            s.target_row_state.iter().all(Vec::is_empty),
             "ignore rows are irrelevant to duplicate validation state"
         );
     }
