@@ -1,22 +1,51 @@
 //! Parallel column encoding for a single parquet file.
 //!
+//! Each leaf column of a row group encodes on its own task, so encoding and compression, the
+//! expensive part, run on as many cores as the table has leaf columns. A closed row group keeps
+//! encoding while the next one is fed, so the slowest column of several row groups encodes at
+//! once.
+//!
 //! ```text
-//! ParallelArrowWriter       one file: feeds the pipeline, appends the row groups it hands
-//!   │                       back, and sizes the file while rows are still in flight
-//!   ├─ RowGroupPipeline     the row groups in flight: the open one being fed, and closed
-//!   │    │                  ones still encoding, handed over in order as they finish
-//!   │    └─ RowGroupEncoder     one row group: a task per leaf column, each slice
-//!   │         │                 charged to the budget before it is queued
-//!   │         └─ ColumnEncoder      one leaf column, encoding its slices as they arrive
-//!   └─ EncodeShared         what the partition's files share: the EncodeBudget, which
-//!                           bounds the arrow bytes queued ahead of the encoders, and the
-//!                           SizeModel, the bytes per row of the appended row groups
+//!       RecordBatch
+//!            │
+//!            ▼
+//! ┌─────────────────────┐
+//! │ ParallelArrowWriter │  one per file: feeds the rows to the pipeline below, and
+//! └──────────┬──────────┘  appends the row groups it hands back to the file
+//!            │
+//!            ▼
+//! ┌─────────────────────┐  cuts the rows into row groups of max_row_group_row_count rows,
+//! │  RowGroupPipeline   │  up to 8 in flight: the open one takes new rows, the closed ones
+//! └──────────┬──────────┘  finish encoding theirs, and the oldest leaves first
+//!            │
+//!            ▼ open           closed, newest              closed, oldest
+//! ┌─────────────────────┐ ┌─────────────────────┐     ┌─────────────────────┐
+//! │   RowGroupEncoder   │ │   RowGroupEncoder   │ ... │   RowGroupEncoder   │
+//! └───┬──────┬──────┬───┘ └───┬──────┬──────┬───┘     └───┬──────┬──────┬───┘
+//!     ▼      ▼      ▼         ▼      ▼      ▼             ▼      ▼      ▼
+//!   col 0  col 1  col n     col 0  col 1  col n         col 0  col 1  col n
+//!                                                         │      │      │
+//!   one ColumnEncoder task per leaf column of             └──────┼──────┘
+//!   each row group in flight, all running at once                │ EncodedRowGroup, once
+//!                                                                ▼ all its columns are done
+//!                                                     ┌──────────────────────┐
+//!                                                     │ SerializedFileWriter │ ──► sink
+//!                                                     └──────────────────────┘
 //! ```
 //!
-//! Each leaf column of a row group encodes on its own task, so encoding and
-//! compression, the expensive part, run on as many cores as the table has leaf
-//! columns. A closed row group keeps encoding while the next one is fed, so the
-//! slowest column of several row groups encodes at once.
+//! Every file of a partition shares one `EncodeShared`, since a rolled file keeps encoding in
+//! the background while the next one is fed:
+//!
+//! - `EncodeBudget` bounds the arrow bytes queued ahead of the column tasks. A slice takes its
+//!   bytes before it is queued, and its task gives them back once the slice is encoded.
+//! - `SizeModel` keeps the bytes per row of the appended row groups. It sizes the rows still in
+//!   flight, so the `PartitionWriter` can roll a file at its target without waiting for the
+//!   encoders. Before the first row group is appended, or when the rows change shape, a write
+//!   that could carry the file past its target waits for the encoders instead.
+//!
+//! `ParallelArrowWriter` and `EncodeShared` live here, `RowGroupPipeline` in `pipeline.rs`,
+//! `RowGroupEncoder` and `LeafLayout` in `row_group.rs`, `ColumnEncoder` in `column.rs`,
+//! `EncodeBudget` in `budget.rs`, and `SizeModel` in `size_model.rs`.
 
 mod budget;
 mod column;
