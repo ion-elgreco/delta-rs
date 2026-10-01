@@ -44,8 +44,8 @@
 //!   that could carry the file past its target waits for the encoders instead.
 //!
 //! `ParallelArrowWriter` and `EncodeShared` live here, `RowGroupPipeline` in `pipeline.rs`,
-//! `RowGroupEncoder` and `LeafLayout` in `row_group.rs`, `ColumnEncoder` in `column.rs`,
-//! `EncodeBudget` in `budget.rs`, and `SizeModel` in `size_model.rs`.
+//! `RowGroupEncoder` in `row_group.rs`, `ColumnEncoder` in `column.rs`, `EncodeBudget` in
+//! `budget.rs`, and `SizeModel` in `size_model.rs`.
 
 mod budget;
 mod column;
@@ -70,7 +70,7 @@ use parquet::file::writer::SerializedFileWriter;
 
 use self::budget::EncodeBudget;
 use self::pipeline::RowGroupPipeline;
-use self::row_group::{EncodedRowGroup, LeafLayout};
+use self::row_group::EncodedRowGroup;
 use self::size_model::SizeModel;
 
 /// Arrow-specific settings for writing parquet data files.
@@ -197,17 +197,16 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         let parquet_schema = ArrowSchemaConverter::new()
             .with_coerce_types(props.coerce_types())
             .convert(&arrow_schema)?;
-        let layout = Arc::new(LeafLayout::new(arrow_schema.clone(), &parquet_schema));
         let file_writer =
             SerializedFileWriter::new(Vec::new(), parquet_schema.root_schema_ptr(), props.clone())?;
 
-        let mut factory = ArrowRowGroupWriterFactory::new(&file_writer, arrow_schema);
+        let mut factory = ArrowRowGroupWriterFactory::new(&file_writer, arrow_schema.clone());
         if let Some(page_store_factory) = options.page_store_factory {
             factory = factory.with_page_store_factory(page_store_factory);
         }
         let pipeline = RowGroupPipeline::new(
             factory,
-            layout,
+            arrow_schema,
             shared.budget.clone(),
             props.max_row_group_row_count().unwrap_or(usize::MAX),
         );
@@ -304,16 +303,11 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
 
     /// Append a finished row group to the file and send its bytes on.
     async fn append(&mut self, row_group: EncodedRowGroup) -> ParquetResult<()> {
-        // The pages are copied into the file buffer, which the last flush left
-        // empty. Size it once, so the copy is not repeated as the buffer grows.
         let bytes: u64 = row_group
             .chunks
             .iter()
             .map(|chunk| chunk.close().bytes_written)
             .sum();
-        self.file_writer
-            .inner_mut()
-            .reserve(usize::try_from(bytes).unwrap_or(0) + APPEND_SLACK);
         let mut writer = self.file_writer.next_row_group()?;
         for chunk in row_group.chunks {
             chunk.append_to_row_group(&mut writer)?;
@@ -334,7 +328,3 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         self.sink_writer.write(Bytes::from(buffer)).await
     }
 }
-
-/// Room left in the file buffer beyond a row group's pages: the bytes the file
-/// writer's own 8 KiB buffer may still hold from before.
-const APPEND_SLACK: usize = 8 * 1024;

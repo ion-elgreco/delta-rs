@@ -2,14 +2,15 @@
 //! still encoding their backlog, handed over in order as they finish.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
 use parquet::arrow::arrow_writer::ArrowRowGroupWriterFactory;
 use parquet::errors::Result as ParquetResult;
 
 use super::budget::EncodeBudget;
-use super::row_group::{EncodedRowGroup, LeafLayout, RowGroupEncoder};
+use super::row_group::{EncodedRowGroup, RowGroupEncoder};
 
 /// Row groups a file may have in flight: the open one plus closed ones still
 /// encoding their backlog. Each extra group runs one more encoder per column and
@@ -30,7 +31,7 @@ fn row_groups_in_flight() -> usize {
 /// at once.
 pub(super) struct RowGroupPipeline {
     factory: ArrowRowGroupWriterFactory,
-    layout: Arc<LeafLayout>,
+    schema: SchemaRef,
     budget: EncodeBudget,
     max_rows: usize,
     /// The row group being fed; none until the first write.
@@ -44,13 +45,13 @@ pub(super) struct RowGroupPipeline {
 impl RowGroupPipeline {
     pub(super) fn new(
         factory: ArrowRowGroupWriterFactory,
-        layout: Arc<LeafLayout>,
+        schema: SchemaRef,
         budget: EncodeBudget,
         max_rows: usize,
     ) -> Self {
         Self {
             factory,
-            layout,
+            schema,
             budget,
             max_rows,
             open: None,
@@ -144,7 +145,7 @@ impl RowGroupPipeline {
             self.next_index += 1;
             self.open = Some(RowGroupEncoder::spawn(
                 column_writers,
-                self.layout.clone(),
+                self.schema.clone(),
                 self.budget.clone(),
             ));
         }

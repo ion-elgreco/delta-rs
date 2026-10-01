@@ -4,43 +4,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use arrow_array::ArrayRef;
-use arrow_schema::FieldRef;
-use parquet::arrow::arrow_writer::{
-    ArrowColumnChunk, ArrowColumnWriter, ArrowLeafColumn, compute_leaves,
-};
+use parquet::arrow::arrow_writer::{ArrowColumnChunk, ArrowColumnWriter, ArrowLeafColumn};
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
-/// The rows of one leaf column handed to its encoder in one go. A flat field
-/// ships its array, so the parquet levels are computed on the encoder's task; a
-/// nested field fans out to several leaves, so its levels are computed upstream
-/// and shipped per leaf.
-pub(super) enum Slice {
-    Column(FieldRef, ArrayRef),
-    Leaf(ArrowLeafColumn),
-}
-
-impl Slice {
-    fn encode(self, writer: &mut ArrowColumnWriter) -> ParquetResult<()> {
-        match self {
-            Slice::Leaf(leaf) => writer.write(&leaf),
-            Slice::Column(field, array) => {
-                let mut leaves = compute_leaves(&field, &array)?;
-                let leaf = leaves.pop().ok_or_else(|| {
-                    ParquetError::General(format!("field {} has no leaf column", field.name()))
-                })?;
-                writer.write(&leaf)
-            }
-        }
-    }
-}
-
 /// A queued slice and its share of the encode budget, which the task releases
 /// once the slice is encoded.
-type Queued = (Slice, OwnedSemaphorePermit);
+type Queued = (ArrowLeafColumn, OwnedSemaphorePermit);
 
 /// Encodes the slices of one leaf column on its own task, as they arrive.
 pub(super) struct ColumnEncoder {
@@ -80,7 +52,11 @@ impl ColumnEncoder {
     }
 
     /// Queue `slice`, with `permit` as its share of the encode budget.
-    pub(super) fn send(&self, slice: Slice, permit: OwnedSemaphorePermit) -> ParquetResult<()> {
+    pub(super) fn send(
+        &self,
+        slice: ArrowLeafColumn,
+        permit: OwnedSemaphorePermit,
+    ) -> ParquetResult<()> {
         let sender = self
             .sender
             .as_ref()
@@ -135,7 +111,7 @@ async fn encode_column(
 ) -> ParquetResult<ArrowColumnChunk> {
     let mut since_yield = Instant::now();
     while let Some((slice, budget)) = receiver.recv().await {
-        if let Err(e) = slice.encode(&mut writer) {
+        if let Err(e) = writer.write(&slice) {
             let _ = failure.set(e.to_string());
             return Err(e);
         }
