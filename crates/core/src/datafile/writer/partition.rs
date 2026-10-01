@@ -19,7 +19,7 @@ use tracing::*;
 use crate::datafile::DataFileWriter;
 use crate::datafile::writer::WriteError;
 use crate::datafile::writer::file::LazyArrowWriter;
-use crate::datafile::writer::parallel::ArrowWriterOptions;
+use crate::datafile::writer::parallel::{ArrowWriterOptions, EncodeShared};
 
 use crate::datafile::writer::upload_budget::UploadBudget;
 use crate::errors::{DeltaResult, DeltaTableError};
@@ -70,7 +70,7 @@ pub struct PartitionWriterConfig {
     pub(super) arrow_options: ArrowWriterOptions,
     /// Size above which we will write a buffered parquet file to disk.
     /// If None, the writer will not create a new file until the writer is closed.
-    target_file_size: Option<NonZeroU64>,
+    pub(super) target_file_size: Option<NonZeroU64>,
     /// Row chunks passed to parquet writer. This and the internal parquet writer settings
     /// determine how fine granular we can track / control the size of resulting files.
     write_batch_size: usize,
@@ -83,6 +83,9 @@ pub struct PartitionWriterConfig {
     /// [`UploadBudget`] for closed files still uploading. Cloning the config shares it,
     /// so every file this writer closes draws on one bound.
     pub(super) upload_budget: UploadBudget,
+    /// Encode budget and row group sizes shared by every file this writer opens, see
+    /// [`EncodeShared`]. Cloning the config shares them too.
+    pub(super) encode: EncodeShared,
 }
 
 impl PartitionWriterConfig {
@@ -122,6 +125,7 @@ impl PartitionWriterConfig {
             max_concurrency_tasks: max_concurrency_tasks.unwrap_or_else(get_max_concurrency_tasks),
             roll_on_row_group_boundary: roll_on_row_group_boundary_default(),
             upload_budget: UploadBudget::for_write(target_file_size),
+            encode: EncodeShared::new(),
         })
     }
 
@@ -543,11 +547,19 @@ mod tests {
         )
         .unwrap();
 
-        let result = writer.write(&batch).await;
-        assert!(result.is_err(), "injected multipart failure must surface");
-        // The first-write error path must leave the writer cleanly abortable —
-        // no leaked upload, no panic.
-        writer.abort().await.unwrap();
+        // The row group is appended to the sink once its encoders finish, so the
+        // failure surfaces in the first `write` or, at the latest, in `close`.
+        match writer.write(&batch).await {
+            Err(_) => {
+                // The first-write error path must leave the writer cleanly
+                // abortable — no leaked upload, no panic.
+                writer.abort().await.unwrap();
+            }
+            Ok(()) => {
+                let result = writer.close().await;
+                assert!(result.is_err(), "injected multipart failure must surface");
+            }
+        }
     }
 
     #[test]
@@ -841,6 +853,111 @@ mod tests {
         let group_sizes = write_and_collect_group_sizes(false).await;
         let runts: Vec<_> = group_sizes.iter().filter(|n| **n != 1024).collect();
         assert!(runts.len() > 1);
+    }
+
+    /// Files roll on a projected size, without waiting for the encoders to catch
+    /// up. A unique column and a column cycling through a few values both pay a
+    /// dictionary page per row group; every file but the last must still land
+    /// close to the target.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_rolled_files_land_near_the_target_size() {
+        use arrow::array::Int64Array;
+
+        const ROWS: usize = 400_000;
+        const TARGET: u64 = 400_000;
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..ROWS as i64)),
+                Arc::new(StringArray::from_iter_values(
+                    (0..ROWS).map(|i| format!("value_{}", i % 1000)),
+                )),
+            ],
+        )
+        .unwrap();
+
+        let object_store = DeltaTableBuilder::from_url(url::Url::parse("memory:///").unwrap())
+            .unwrap()
+            .build_storage()
+            .unwrap()
+            .object_store();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::SNAPPY)
+            .set_max_row_group_row_count(Some(16 * 1024))
+            .build();
+        let mut writer = get_partition_writer(
+            object_store,
+            &batch,
+            Some(properties),
+            NonZeroU64::new(TARGET),
+            None,
+        );
+        // Feed batches of DataFusion's default size, as a scan would.
+        for offset in (0..ROWS).step_by(8192) {
+            let length = usize::min(8192, ROWS - offset);
+            writer.write(&batch.slice(offset, length)).await.unwrap();
+        }
+
+        // `close` returns the files in write order.
+        let adds = writer.close().await.unwrap();
+        assert!(
+            adds.len() >= 3,
+            "expected several files, got {}",
+            adds.len()
+        );
+        for add in &adds[..adds.len() - 1] {
+            let ratio = add.size as f64 / TARGET as f64;
+            assert!(
+                (0.85..=1.15).contains(&ratio),
+                "a {}-byte file for a {TARGET}-byte target",
+                add.size
+            );
+        }
+    }
+
+    /// Parquet takes month-day-nano intervals in the schema but cannot encode
+    /// them. The column encoder fails on its own task; the error must still carry
+    /// parquet's reason, whether the next hand-off or the append reports it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_encode_failure_reports_its_reason() {
+        use arrow::array::IntervalMonthDayNanoArray;
+        use arrow::datatypes::{IntervalMonthDayNano, IntervalUnit};
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "span",
+            DataType::Interval(IntervalUnit::MonthDayNano),
+            false,
+        )]));
+        let spans = IntervalMonthDayNanoArray::from_iter_values(
+            (0..200_000).map(|days| IntervalMonthDayNano::new(0, days, 0)),
+        );
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(spans)]).unwrap();
+
+        let object_store = DeltaTableBuilder::from_url(url::Url::parse("memory:///").unwrap())
+            .unwrap()
+            .build_storage()
+            .unwrap()
+            .object_store();
+        let mut writer =
+            get_partition_writer(object_store, &batch, None, NonZeroU64::new(1 << 30), None);
+        // The first write hands its slices over before the encoder has failed.
+        // Keep writing until a hand-off finds the encoder stopped: that error,
+        // not the one the append would report, is the one under test.
+        let mut result = writer.write(&batch).await;
+        for _ in 0..200 {
+            if result.is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            result = writer.write(&batch).await;
+        }
+        let err = result.expect_err("month-day-nano intervals cannot be encoded");
+        assert!(err.to_string().contains("column encoder stopped"), "{err}");
+        assert!(err.to_string().contains("not yet implemented"), "{err}");
     }
 
     #[tokio::test]

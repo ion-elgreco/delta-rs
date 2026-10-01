@@ -152,6 +152,8 @@ impl FileArrowWriter {
                 config.file_schema.clone(),
                 config.writer_properties.clone(),
                 Some(options.clone()),
+                config.encode.clone(),
+                config.target_file_size.map(|size| size.get()),
             )
             .map(Self::Parallel)
         } else {
@@ -283,9 +285,10 @@ impl LazyArrowWriter {
     /// Upper bound on the memory this file's upload still holds after the writer closes
     /// it. Two things are outstanding at that moment.
     ///
-    /// First, the row group being built is still in memory. `memory_size` is parquet's
-    /// figure for it, which parquet documents as at least what that row group will
-    /// encode to.
+    /// First, the row groups not yet appended are still in memory. `memory_size` is
+    /// parquet's figure for what their encoders hold, which parquet documents as at
+    /// least what the rows encoded so far will encode to; `in_progress_size` also
+    /// covers the rows still queued, which a file that rolls on a projected size has.
     ///
     /// Second, bytes already sent to the object store that it has not acknowledged. The
     /// multipart uploader sends them as parts of `upload_part_size` and keeps up to
@@ -298,7 +301,9 @@ impl LazyArrowWriter {
         match self {
             LazyArrowWriter::Initialized(_, _, _) => 0,
             LazyArrowWriter::Writing(_, arrow_writer) => {
-                let buffered = arrow_writer.memory_size();
+                let buffered = arrow_writer
+                    .memory_size()
+                    .max(arrow_writer.in_progress_size());
                 let last_row_group = arrow_writer
                     .flushed_row_groups()
                     .last()

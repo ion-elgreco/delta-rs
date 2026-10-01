@@ -1,7 +1,7 @@
 //! Abstractions and implementations for writing data to delta tables
 //!
 //! A write fans out four times: over partitions, over the files of each partition, over the
-//! columns of each file's open row group, and over the parts of each file's upload.
+//! columns of each file's row groups in flight, and over the parts of each file's upload.
 //!
 //! ```text
 //!                                  RecordBatch from any source
@@ -35,18 +35,18 @@
 //!                │ Writing holds
 //!                ▼
 //!      ┌─────────────────────┐
-//!      │ ParallelArrowWriter │  keeps one row group open; splits each slice into its
-//!      └─────────┬───────────┘  leaf columns and sends each one to that column's worker task
-//!    ┌───────────┼───────────┐
+//!      │ ParallelArrowWriter │  keeps up to 8 row groups in flight; splits each slice into
+//!      └─────────┬───────────┘  its leaf columns and sends each one to the open row group's
+//!    ┌───────────┼───────────┐  worker task for that column
 //!    ▼           ▼           ▼
 //! column 0    column 1 ... column n  one task per leaf column, spawned when the row group
 //!    │           │           │       opens; each encodes and compresses its slices as they
-//!    └───────────┼───────────┘       arrive, and returns its column chunk when the row
-//!                │                   group closes at max_row_group_row_count rows
+//!    └───────────┼───────────┘       arrive, also after the row group closed at
+//!                │                   max_row_group_row_count rows, and then returns its chunk
 //!                ▼
 //!      ┌──────────────────────┐
-//!      │ SerializedFileWriter │  appends the chunks in column order, then hands the row
-//!      └─────────┬────────────┘  group's bytes to ParquetObjectWriter
+//!      │ SerializedFileWriter │  appends the row groups in order as they finish, and hands
+//!      └─────────┬────────────┘  each one's bytes to ParquetObjectWriter
 //!                │
 //!                ▼
 //!      ┌───────────────────┐
@@ -64,6 +64,8 @@
 //! of one file never wait on another file. Bytes reach the `BufWriter` only as complete row
 //! groups, by default every 1,048,576 rows. A file with several row groups uploads the earlier
 //! ones while it is written. A file with one row group is sent entirely by its finish task.
+//! A file rolls on a projected size: the rows in flight count at the bytes per row of the
+//! partition's appended row groups, so a roll never waits for the encoders.
 //! All partition writers of one write reserve bytes in the same `UploadBudget`, so a slow
 //! store makes them wait instead of holding more files in memory. With
 //! [`ArrowWriterOptions::with_enable_parallel_encoding`] set to `false`, arrow-rs's
@@ -72,8 +74,8 @@
 //!
 //! [`DeltaWriter`] lives in `dataset.rs`, [`PartitionWriter`] in `partition.rs`, the
 //! `LazyArrowWriter`, its `FileArrowWriter` and its upload in `file.rs`, the
-//! `ParallelArrowWriter` and its column tasks in `parallel.rs`, and the `UploadBudget` in
-//! `upload_budget.rs`.
+//! `ParallelArrowWriter`, its row group pipeline and its column tasks in `parallel/`, and the
+//! `UploadBudget` in `upload_budget.rs`.
 
 use arrow_schema::{ArrowError, SchemaRef as ArrowSchemaRef};
 
