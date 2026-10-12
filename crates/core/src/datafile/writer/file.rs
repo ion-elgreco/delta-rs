@@ -17,6 +17,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tracing::*;
 
 use super::PartitionWriterConfig;
+use super::custom::CustomArrowWriter;
 use super::parallel::ParallelArrowWriter;
 use crate::errors::DeltaResult;
 use crate::logstore::ObjectStoreRef;
@@ -102,12 +103,14 @@ async fn finish_parquet_file(
 }
 
 /// [`ParquetObjectWriter`] for writing to parquet to an [`object_store::ObjectStore`].
+/// Also the sink a [`CustomArrowWriter`] receives; to it, the type is its
+/// [`AsyncFileWriter`] impl and nothing more.
 ///
 /// Copied from parquet 59.2, which deprecated it in favor of passing a
 /// [`BufWriter`] to [`AsyncArrowWriter`] directly (apache/arrow-rs#10354). That
 /// route goes through `AsyncWrite`; this one keeps [`BufWriter::put`], which
 /// "can write data without extra copying".
-pub(super) struct ParquetObjectWriter(BufWriter);
+pub struct ParquetObjectWriter(BufWriter);
 
 impl ParquetObjectWriter {
     /// Abort the in-progress multipart upload, if any.
@@ -136,17 +139,32 @@ impl AsyncFileWriter for ParquetObjectWriter {
     }
 }
 
-/// The parquet writer of one file: its columns encoded in parallel, or one after another
-/// by arrow-rs. Chosen by [`ArrowWriterOptions::with_enable_parallel_encoding`].
+/// The parquet writer of one file: its columns encoded in parallel, one after another by
+/// arrow-rs, or by a [`CustomArrowWriter`] of the caller's own. Chosen by
+/// [`ArrowWriterOptions::with_enable_parallel_encoding`] and
+/// [`ArrowWriterOptions::with_custom_writer`].
+///
+/// [`ArrowWriterOptions::with_enable_parallel_encoding`]: super::ArrowWriterOptions::with_enable_parallel_encoding
+/// [`ArrowWriterOptions::with_custom_writer`]: super::ArrowWriterOptions::with_custom_writer
 pub(super) enum FileArrowWriter {
     Parallel(ParallelArrowWriter<ParquetObjectWriter>),
     Serial(AsyncArrowWriter<ParquetObjectWriter>),
+    Custom(Box<dyn CustomArrowWriter>),
 }
 
 impl FileArrowWriter {
     fn try_new(writer: ParquetObjectWriter, config: &PartitionWriterConfig) -> ParquetResult<Self> {
         let options = &config.arrow_options;
-        if options.enable_parallel_encoding() {
+        if let Some(factory) = options.custom_writer() {
+            factory
+                .create(
+                    writer,
+                    config.file_schema.clone(),
+                    config.writer_properties.clone(),
+                    options,
+                )
+                .map(Self::Custom)
+        } else if options.enable_parallel_encoding() {
             ParallelArrowWriter::try_new(
                 writer,
                 config.file_schema.clone(),
@@ -168,6 +186,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.write(batch).await,
             Self::Serial(writer) => writer.write(batch).await,
+            Self::Custom(writer) => writer.write(batch).await,
         }
     }
 
@@ -175,6 +194,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.finish().await,
             Self::Serial(writer) => writer.finish().await,
+            Self::Custom(writer) => writer.finish().await,
         }
     }
 
@@ -182,6 +202,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.into_inner(),
             Self::Serial(writer) => writer.into_inner(),
+            Self::Custom(writer) => writer.into_inner(),
         }
     }
 
@@ -189,6 +210,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.bytes_written(),
             Self::Serial(writer) => writer.bytes_written(),
+            Self::Custom(writer) => writer.bytes_written(),
         }
     }
 
@@ -196,6 +218,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.in_progress_size(),
             Self::Serial(writer) => writer.in_progress_size(),
+            Self::Custom(writer) => writer.in_progress_size(),
         }
     }
 
@@ -203,6 +226,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.memory_size(),
             Self::Serial(writer) => writer.memory_size(),
+            Self::Custom(writer) => writer.memory_size(),
         }
     }
 
@@ -210,6 +234,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.in_progress_rows(),
             Self::Serial(writer) => writer.in_progress_rows(),
+            Self::Custom(writer) => writer.in_progress_rows(),
         }
     }
 
@@ -217,6 +242,7 @@ impl FileArrowWriter {
         match self {
             Self::Parallel(writer) => writer.flushed_row_groups(),
             Self::Serial(writer) => writer.flushed_row_groups(),
+            Self::Custom(writer) => writer.flushed_row_groups(),
         }
     }
 }

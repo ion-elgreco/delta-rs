@@ -26,6 +26,8 @@ use parquet::file::writer::SerializedFileWriter;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 use tokio::task::JoinHandle;
 
+use super::custom::CustomArrowWriterFactory;
+
 /// One leaf column of the open row group, encoded by its own task.
 struct ColumnWorker {
     sender: Option<Sender<ArrowLeafColumn>>,
@@ -42,6 +44,7 @@ pub struct ArrowWriterOptions {
     skip_arrow_metadata_hint: bool,
     page_store_factory: Option<Arc<dyn PageStoreFactory>>,
     enable_parallel_encoding: bool,
+    custom_writer: Option<Arc<dyn CustomArrowWriterFactory>>,
 }
 
 impl Default for ArrowWriterOptions {
@@ -50,6 +53,7 @@ impl Default for ArrowWriterOptions {
             skip_arrow_metadata_hint: false,
             page_store_factory: None,
             enable_parallel_encoding: true,
+            custom_writer: None,
         }
     }
 }
@@ -78,9 +82,19 @@ impl ArrowWriterOptions {
     }
 
     /// Encode each column of a row group in its own task (defaults to `true`). When `false`,
-    /// arrow-rs's `AsyncArrowWriter` encodes the columns one after another.
+    /// arrow-rs's `AsyncArrowWriter` encodes the columns one after another. Not consulted
+    /// once [`Self::with_custom_writer`] is set.
     pub fn with_enable_parallel_encoding(mut self, enable_parallel_encoding: bool) -> Self {
         self.enable_parallel_encoding = enable_parallel_encoding;
+        self
+    }
+
+    /// Write every data file with the [`CustomArrowWriter`] that `factory` creates for it,
+    /// in place of the built-in writers.
+    ///
+    /// [`CustomArrowWriter`]: super::CustomArrowWriter
+    pub fn with_custom_writer(mut self, factory: Arc<dyn CustomArrowWriterFactory>) -> Self {
+        self.custom_writer = Some(factory);
         self
     }
 
@@ -88,8 +102,15 @@ impl ArrowWriterOptions {
         self.enable_parallel_encoding
     }
 
-    /// The same settings as parquet's own options, for `AsyncArrowWriter`.
-    pub(crate) fn to_parquet_options(
+    pub(crate) fn custom_writer(&self) -> Option<&dyn CustomArrowWriterFactory> {
+        self.custom_writer.as_deref()
+    }
+
+    /// The same settings as parquet's own options, for `AsyncArrowWriter`; a
+    /// [`CustomArrowWriter`] built on arrow-rs passes them on.
+    ///
+    /// [`CustomArrowWriter`]: super::CustomArrowWriter
+    pub fn to_parquet_options(
         &self,
         props: WriterProperties,
     ) -> parquet::arrow::arrow_writer::ArrowWriterOptions {

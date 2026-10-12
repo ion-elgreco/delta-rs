@@ -68,26 +68,32 @@
 //! store makes them wait instead of holding more files in memory. With
 //! [`ArrowWriterOptions::with_enable_parallel_encoding`] set to `false`, arrow-rs's
 //! `AsyncArrowWriter` takes the place of `ParallelArrowWriter` and encodes the columns of a
-//! row group one after another.
+//! row group one after another. With [`ArrowWriterOptions::with_custom_writer`], a
+//! [`CustomArrowWriter`] of the caller's own takes that place: it receives the
+//! `ParquetObjectWriter` of each file and reports the same size figures the built-in
+//! writers do.
 //!
 //! [`DeltaWriter`] lives in `dataset.rs`, [`PartitionWriter`] in `partition.rs`, the
 //! `LazyArrowWriter`, its `FileArrowWriter` and its upload in `file.rs`, the
-//! `ParallelArrowWriter` and its column tasks in `parallel.rs`, and the `UploadBudget` in
-//! `upload_budget.rs`.
+//! `ParallelArrowWriter` and its column tasks in `parallel.rs`, the `CustomArrowWriter`
+//! trait in `custom.rs`, and the `UploadBudget` in `upload_budget.rs`.
 
 use arrow_schema::{ArrowError, SchemaRef as ArrowSchemaRef};
 
 use crate::errors::DeltaTableError;
 
+mod custom;
 mod dataset;
 mod file;
 mod parallel;
 mod partition;
 mod upload_budget;
 
+pub use custom::{CustomArrowWriter, CustomArrowWriterFactory};
 #[cfg(feature = "datafusion")]
 pub(crate) use dataset::write_batches_timed;
 pub use dataset::{DeltaWriter, WriterConfig};
+pub use file::ParquetObjectWriter;
 pub use parallel::ArrowWriterOptions;
 pub use partition::{PartitionWriter, PartitionWriterConfig};
 pub(crate) use upload_budget::UploadBudget;
