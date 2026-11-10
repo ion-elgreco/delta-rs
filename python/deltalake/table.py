@@ -381,7 +381,7 @@ class DeltaTable:
             table_uri: the path of the DeltaTable
             version: version of the DeltaTable
             storage_options: a dictionary of the options to use for the storage backend
-            without_files: Deprecated and ignored. Table loading materializes active-file metadata.
+            without_files: Deprecated and ignored. Table loading does not read the active files; they are read from the log when an operation needs them.
             log_buffer_size: Deprecated and ignored. Log buffering is managed internally.
             skip_stats: Deprecated and ignored. Table loading retains file statistics.
 
@@ -389,7 +389,8 @@ class DeltaTable:
         if without_files:
             warnings.warn(
                 "The 'without_files' parameter is deprecated and ignored. "
-                "Table loading materializes active-file metadata.",
+                "Table loading does not read the active files; "
+                "they are read from the log when an operation needs them.",
                 DeprecationWarning,
                 stacklevel=2,
             )

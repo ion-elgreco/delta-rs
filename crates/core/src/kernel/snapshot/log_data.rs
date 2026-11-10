@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
-use delta_kernel::actions::{Metadata, Protocol};
 use delta_kernel::engine::arrow_conversion::TryIntoKernel;
 use delta_kernel::expressions::{Scalar, StructData};
 use delta_kernel::table_configuration::TableConfiguration;
-use delta_kernel::table_properties::TableProperties;
 use indexmap::IndexMap;
 
 use super::super::scalars::ScalarExt;
@@ -69,18 +67,6 @@ impl<'a> LogDataHandler<'a> {
 
     pub(crate) fn table_configuration(&self) -> &TableConfiguration {
         self.config
-    }
-
-    pub(crate) fn table_properties(&self) -> &TableProperties {
-        self.config.table_properties()
-    }
-
-    pub(crate) fn protocol(&self) -> &Protocol {
-        self.config.protocol()
-    }
-
-    pub(crate) fn metadata(&self) -> &Metadata {
-        self.config.metadata()
     }
 
     /// The number of files in the log data.
@@ -514,7 +500,8 @@ mod df_tests {
         let table = crate::open_table(url::Url::from_directory_path(path).unwrap())
             .await
             .unwrap();
-        let log_data = table.snapshot().unwrap().log_data();
+        let eager = table.eager_snapshot().await.unwrap();
+        let log_data = eager.log_data();
         files_matching_predicate(log_data, &[predicate])
             .unwrap()
             .map(|add| add.path)

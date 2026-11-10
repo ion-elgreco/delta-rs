@@ -1,6 +1,7 @@
 //! Update metadata on a field in a schema
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use delta_kernel::schema::{MetadataValue, StructType};
 use futures::future::BoxFuture;
@@ -9,8 +10,7 @@ use itertools::Itertools;
 use crate::DeltaTable;
 use crate::kernel::transaction::CommitProperties;
 use crate::kernel::{
-    Action, EagerSnapshot, MetadataExt as _, ProtocolExt as _, SnapshotMetadataRef,
-    resolve_snapshot,
+    Action, MetadataExt as _, ProtocolExt as _, Snapshot, SnapshotMetadataRef, resolve_snapshot,
 };
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
@@ -20,7 +20,7 @@ use crate::{DeltaResult, DeltaTableError};
 /// Update a field's metadata in a schema. If the key does not exists, the entry is inserted.
 pub struct UpdateFieldMetadataBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// The name of the field where the metadata may be updated
     field_name: String,
     /// HashMap of the metadata to upsert
@@ -33,7 +33,7 @@ pub struct UpdateFieldMetadataBuilder {
 
 impl UpdateFieldMetadataBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             metadata: HashMap::new(),
             field_name: String::new(),
@@ -136,7 +136,7 @@ impl std::future::IntoFuture for UpdateFieldMetadataBuilder {
             let snapshot = resolve_snapshot(&this.log_store, this.snapshot.clone(), None).await?;
 
             let (actions, operation) = plan_update_field_metadata_actions(
-                snapshot.snapshot().metadata_state(),
+                snapshot.metadata_state(),
                 &this.field_name,
                 this.metadata.clone(),
             )?;

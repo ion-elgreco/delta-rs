@@ -43,7 +43,7 @@ use deltalake::kernel::scalars::ScalarExt;
 use deltalake::kernel::transaction::{CommitBuilder, CommitProperties, TableReference};
 use deltalake::kernel::{
     Action, Add, EagerSnapshot, IsolationLevel, LogicalFileView, MetadataExt as _, Remove,
-    Transaction, Version,
+    Snapshot, Transaction, Version,
 };
 use deltalake::logstore::LogStoreRef;
 use deltalake::logstore::{IORuntime, ObjectStoreRef};
@@ -354,7 +354,7 @@ impl RawDeltaTable {
         self.with_table(|t| Ok(t.log_store().object_store().clone()))
     }
 
-    fn cloned_state(&self) -> PyResult<EagerSnapshot> {
+    fn cloned_state(&self) -> PyResult<Arc<Snapshot>> {
         self.with_table(|t| {
             t.snapshot()
                 .map(|snapshot| snapshot.snapshot())
@@ -394,6 +394,15 @@ impl RawDeltaTable {
         self.with_table(|t| Ok(t.snapshot().map_err(PythonError::from)?.schema().clone()))
     }
 
+    /// The active files of the loaded table version, read from the log into memory.
+    fn eager_state(&self) -> PyResult<EagerSnapshot> {
+        self.with_table(|t| {
+            rt().block_on(t.eager_snapshot())
+                .map_err(PythonError::from)
+                .map_err(PyErr::from)
+        })
+    }
+
     /// Clone both the table handle and its snapshot state under a single lock acquisition.
     ///
     /// This avoids a TOCTOU gap that could occur if we called `with_table` and `cloned_state`
@@ -402,7 +411,7 @@ impl RawDeltaTable {
     /// The full `DeltaTable` clone is needed so the caller can call
     /// `update_datafusion_session` (which registers object stores) outside the Mutex guard —
     /// holding the Mutex across async work would risk deadlocks.
-    fn cloned_table_and_state(&self) -> PyResult<(deltalake::DeltaTable, EagerSnapshot)> {
+    fn cloned_table_and_state(&self) -> PyResult<(deltalake::DeltaTable, Arc<Snapshot>)> {
         match self._table.lock() {
             Ok(table) => {
                 let state = table
@@ -665,10 +674,9 @@ impl RawDeltaTable {
                 })
             } else {
                 match self._table.lock() {
-                    Ok(table) => Ok(table
-                        .get_file_uris()
+                    Ok(table) => Ok(rt()
+                        .block_on(table.get_file_uris())
                         .map_err(PythonError::from)?
-                        .map(|f| f.to_string())
                         .collect()),
                     Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
                 }
@@ -699,7 +707,8 @@ impl RawDeltaTable {
             })
         } else {
             self.with_table(|t| {
-                Ok(t.get_file_uris()
+                Ok(rt()
+                    .block_on(t.get_file_uris())
                     .map_err(PythonError::from)
                     .map_err(PyErr::from)?
                     .collect::<Vec<String>>())
@@ -1521,7 +1530,7 @@ impl RawDeltaTable {
             )))?;
         };
 
-        self.cloned_state()?
+        self.eager_state()?
             .log_data()
             .iter()
             .filter_map(|f| {
@@ -1849,7 +1858,9 @@ impl RawDeltaTable {
     }
     pub fn get_add_actions(&self, flatten: bool) -> PyResult<Arro3Table> {
         let table: PyTable = self.with_table(|t| -> PyResult<PyTable> {
-            let state = t.snapshot().map_err(PythonError::from)?;
+            let state = rt()
+                .block_on(t.eager_snapshot())
+                .map_err(PythonError::from)?;
             let mut batches = state
                 .add_actions_batches(flatten)
                 .map_err(PythonError::from)?;

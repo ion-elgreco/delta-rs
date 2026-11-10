@@ -360,9 +360,17 @@ mod tests {
                 "part-00000-c9b90f86-73e6-46c8-93ba-ff6bfaf892a1-c000.snappy.parquet",
             ]
         );
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
-        let stats = table.snapshot().unwrap().add_actions_table(true).unwrap();
+        let stats = table
+            .eager_snapshot()
+            .await
+            .unwrap()
+            .add_actions_table(true)
+            .unwrap();
 
         let num_records = stats.column_by_name("num_records").unwrap();
         let num_records = num_records

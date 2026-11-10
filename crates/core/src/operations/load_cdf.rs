@@ -16,10 +16,9 @@ use crate::delta_datafusion::{
     DataFusionMixins, DeltaSessionExt, extract_partition_only_predicate,
 };
 use crate::errors::{ColumnMappingOperation, DeltaResult};
+use crate::kernel::Snapshot;
 use crate::kernel::transaction::PROTOCOL;
-use crate::kernel::{
-    Action, Add, AddCDCFile, CommitInfo, EagerSnapshot, Version, resolve_snapshot,
-};
+use crate::kernel::{Action, Add, AddCDCFile, CommitInfo, Version, resolve_snapshot};
 use crate::logstore::{LogStore, LogStoreExt, LogStoreRef, get_actions};
 use crate::{delta_datafusion::cdf::*, kernel::Remove};
 use arrow_schema::{ArrowError, Field, Schema, SchemaRef};
@@ -53,7 +52,7 @@ const METADATA_CACHE_SIZE: usize = 1024 * 1024;
 #[derive(Clone)]
 pub struct CdfLoadBuilder {
     /// A snapshot of the to-be-loaded table's state
-    pub(crate) snapshot: Option<EagerSnapshot>,
+    pub(crate) snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Version to read from
@@ -90,7 +89,7 @@ impl std::fmt::Debug for CdfLoadBuilder {
 
 impl CdfLoadBuilder {
     /// Create a new [`CdfLoadBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         let parquet_metadata_cache = Arc::new(CachedParquetFileReaderFactory::new(
             log_store.object_store(),
             Arc::new(DefaultCache::new(METADATA_CACHE_SIZE)),
@@ -157,7 +156,7 @@ impl CdfLoadBuilder {
             || matches!(action, Action::CommitInfo(CommitInfo { timestamp: Some(t), .. }) if ts.timestamp_millis() <= *t)
     }
 
-    async fn calculate_earliest_version(&self, snapshot: &EagerSnapshot) -> DeltaResult<Version> {
+    async fn calculate_earliest_version(&self, snapshot: &Snapshot) -> DeltaResult<Version> {
         let ts = self.starting_timestamp.unwrap_or(DateTime::UNIX_EPOCH);
         for v in 0..snapshot.version() {
             if let Ok(Some(bytes)) = self.log_store.read_commit_entry(v).await
@@ -178,7 +177,7 @@ impl CdfLoadBuilder {
     /// than I have right now. I plan to extend the checks once we have a stable state of the initial implementation.
     async fn determine_files_to_read(
         &self,
-        snapshot: &EagerSnapshot,
+        snapshot: &Snapshot,
         partition_pruning: Option<&PartitionPruningPredicate>,
     ) -> DeltaResult<(
         Vec<CdcDataSpec<AddCDCFile>>,

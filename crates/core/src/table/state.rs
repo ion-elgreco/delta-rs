@@ -22,30 +22,36 @@ use crate::kernel::Action;
 use crate::kernel::arrow::engine_ext::{ExpressionEvaluatorExt, SnapshotExt};
 use crate::kernel::snapshot::FIELD_STATS_PARSED;
 use crate::kernel::{
-    ARROW_HANDLER, DataType, EagerSnapshot, LogDataHandler, Metadata, Protocol, Snapshot,
-    TombstoneView, Version,
+    ARROW_HANDLER, DataType, EagerSnapshot, Metadata, Protocol, Snapshot, TombstoneView, Version,
 };
 use crate::logstore::LogStore;
 use crate::{DeltaResult, DeltaTableError};
 
 /// State snapshot currently held by the Delta Table instance.
+///
+/// The state holds the protocol, the metadata, and the log segment of one table version. It
+/// does not hold the active files: they are read from the log when a caller asks for them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeltaTableState {
-    pub(crate) snapshot: EagerSnapshot,
+    #[serde(with = "crate::kernel::snapshot::table_state_serde")]
+    pub(crate) snapshot: Arc<Snapshot>,
 }
 
 impl DeltaTableState {
-    /// Wrap an already-loaded [`EagerSnapshot`] as the in-memory state of a table.
-    pub fn new(snapshot: EagerSnapshot) -> Self {
-        Self { snapshot }
+    /// Use an already-loaded [`Snapshot`] or [`EagerSnapshot`] as the state of a table.
+    ///
+    /// Active files that the snapshot holds in memory stay in memory.
+    pub fn new(snapshot: impl Into<Arc<Snapshot>>) -> Self {
+        Self {
+            snapshot: snapshot.into(),
+        }
     }
 
     /// Create a new DeltaTableState
     pub async fn try_new(log_store: &dyn LogStore, version: Option<Version>) -> DeltaResult<Self> {
         log_store.refresh().await?;
-        // TODO: pass through predictae
-        let snapshot = EagerSnapshot::try_new(log_store, version).await?;
+        let snapshot = Arc::new(Snapshot::try_new(log_store, version).await?);
         Ok(Self { snapshot })
     }
 
@@ -118,12 +124,15 @@ impl DeltaTableState {
 
         let snapshot = EagerSnapshot::new_test(&commit_data).await.unwrap();
 
-        Ok(Self { snapshot })
+        Ok(Self::new(snapshot))
     }
 
-    /// Returns a semantic accessor to the currently loaded log data.
-    pub fn log_data(&self) -> LogDataHandler<'_> {
-        self.snapshot.log_data()
+    /// Read the active files of this table version into memory.
+    ///
+    /// The returned [`EagerSnapshot`] gives synchronous access to the files, for example
+    /// through [`EagerSnapshot::log_data`]. The state itself does not keep them.
+    pub async fn eager_snapshot(&self, log_store: &dyn LogStore) -> DeltaResult<EagerSnapshot> {
+        EagerSnapshot::try_new_with_snapshot(log_store, self.snapshot.clone()).await
     }
 
     /// Full list of tombstones (remove actions) representing files removed from table state).
@@ -131,7 +140,7 @@ impl DeltaTableState {
         &self,
         log_store: &dyn LogStore,
     ) -> BoxStream<'_, DeltaResult<TombstoneView>> {
-        self.snapshot.snapshot().active_tombstones(log_store)
+        self.snapshot.active_tombstones(log_store)
     }
 
     /// Get the transaction version for the given application ID.
@@ -145,8 +154,8 @@ impl DeltaTableState {
         self.snapshot.transaction_version(log_store, app_id).await
     }
 
-    /// Obtain the Eager snapshot of the state
-    pub fn snapshot(&self) -> &EagerSnapshot {
+    /// The snapshot of the table version this state holds.
+    pub fn snapshot(&self) -> &Arc<Snapshot> {
         &self.snapshot
     }
 
@@ -157,7 +166,11 @@ impl DeltaTableState {
         version: Option<Version>,
     ) -> Result<(), DeltaTableError> {
         log_store.refresh().await?;
-        self.snapshot.update(log_store, version).await?;
+        self.snapshot = self
+            .snapshot
+            .clone()
+            .update_from_log_store(log_store, version)
+            .await?;
         Ok(())
     }
 
@@ -190,20 +203,26 @@ impl DeltaTableState {
     /// * `deletion_vector.{field}`: the file's deletion vector descriptor, with
     ///   `cardinality` (Int64) being the number of deleted rows. Only present when
     ///   the table supports deletion vectors, and null for files without one.
-    pub fn add_actions_table(
+    pub async fn add_actions_table(
         &self,
+        log_store: &dyn LogStore,
         flatten: bool,
     ) -> Result<arrow::record_batch::RecordBatch, DeltaTableError> {
-        self.snapshot.add_actions_table(flatten)
+        self.eager_snapshot(log_store)
+            .await?
+            .add_actions_table(flatten)
     }
 
     /// Get add action data as a list of [arrow::record_batch::RecordBatch]
     /// without concatenating them into a single batch.
-    pub fn add_actions_batches(
+    pub async fn add_actions_batches(
         &self,
+        log_store: &dyn LogStore,
         flatten: bool,
     ) -> Result<Vec<arrow::record_batch::RecordBatch>, DeltaTableError> {
-        self.snapshot.add_actions_batches(flatten)
+        self.eager_snapshot(log_store)
+            .await?
+            .add_actions_batches(flatten)
     }
 }
 
@@ -560,7 +579,7 @@ mod tests {
                 None,
             )
             .await?;
-        let _actions = table.snapshot()?.add_actions_table(false)?;
+        let _actions = table.eager_snapshot().await?.add_actions_table(false)?;
         Ok(())
     }
 
@@ -571,17 +590,17 @@ mod tests {
             .with_columns(get_delta_schema().fields().cloned())
             .await?;
 
-        let snapshot = table.snapshot()?.snapshot();
+        let snapshot = table.eager_snapshot().await?;
         assert!(snapshot.add_actions_batches(false)?.is_empty());
         assert!(snapshot.add_actions_batches(true)?.is_empty());
         Ok(())
     }
 
-    async fn open_fixture_state(name: &str) -> DeltaResult<DeltaTableState> {
+    async fn open_fixture_state(name: &str) -> DeltaResult<EagerSnapshot> {
         let path = std::fs::canonicalize(format!("../test/tests/data/{name}"))?;
         let url = url::Url::from_directory_path(path).expect("fixture path is absolute");
         let table = crate::open_table(url).await?;
-        Ok(table.snapshot()?.clone())
+        table.eager_snapshot().await
     }
 
     #[tokio::test]
@@ -647,7 +666,7 @@ mod tests {
             .with_save_mode(SaveMode::Append)
             .await?;
 
-        let snapshot = table.snapshot()?.snapshot();
+        let snapshot = table.eager_snapshot().await?;
         let flattened_batches = snapshot.add_actions_batches(true)?;
         assert!(!flattened_batches.is_empty());
         assert!(
@@ -676,11 +695,12 @@ mod tests {
             .await?;
 
         let state = table.snapshot()?;
-        let before = state.add_actions_table(true)?;
+        let log_store = table.log_store();
+        let before = state.add_actions_table(log_store.as_ref(), true).await?;
 
         let bytes = serde_json::to_vec(state)?;
         let actual: DeltaTableState = serde_json::from_slice(&bytes)?;
-        let after = actual.add_actions_table(true)?;
+        let after = actual.add_actions_table(log_store.as_ref(), true).await?;
 
         assert_eq!(actual.version(), state.version());
         assert_eq!(after, before);
@@ -701,7 +721,7 @@ mod tests {
             .with_save_mode(SaveMode::Append)
             .await?;
 
-        let snapshot = table.snapshot()?.snapshot();
+        let snapshot = table.eager_snapshot().await?;
 
         // Non-flattened batches should have a nested "partition" struct column
         let batches = snapshot.add_actions_batches(false)?;
@@ -741,7 +761,7 @@ mod tests {
             .with_actions(actions)
             .await?;
 
-        let snapshot = table.snapshot()?.snapshot();
+        let snapshot = table.eager_snapshot().await?;
         let batches = snapshot.add_actions_batches(true)?;
         assert!(batches.len() > 1, "expected multi-batch add-actions output");
 

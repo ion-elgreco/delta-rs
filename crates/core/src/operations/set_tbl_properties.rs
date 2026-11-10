@@ -1,6 +1,7 @@
 //! Set table properties on a table
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
@@ -9,8 +10,7 @@ use crate::DeltaTable;
 use crate::errors::{ColumnMappingOperation, DeltaTableError};
 use crate::kernel::transaction::CommitProperties;
 use crate::kernel::{
-    Action, EagerSnapshot, MetadataExt as _, ProtocolExt as _, SnapshotMetadataRef,
-    resolve_snapshot,
+    Action, MetadataExt as _, ProtocolExt as _, Snapshot, SnapshotMetadataRef, resolve_snapshot,
 };
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
@@ -20,7 +20,7 @@ use crate::table::config::TableProperty;
 /// Remove constraints from the table
 pub struct SetTablePropertiesBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Name of the property
     properties: HashMap<String, String>,
     /// Raise if property doesn't exist
@@ -33,7 +33,7 @@ pub struct SetTablePropertiesBuilder {
 
 impl SetTablePropertiesBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             properties: HashMap::new(),
             raise_if_not_exists: true,
@@ -110,7 +110,7 @@ impl std::future::IntoFuture for SetTablePropertiesBuilder {
 
             let properties = this.properties;
             let (actions, operation) = plan_set_table_properties_actions(
-                snapshot.snapshot().metadata_state(),
+                snapshot.metadata_state(),
                 properties,
                 this.raise_if_not_exists,
             )?;

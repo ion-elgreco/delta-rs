@@ -10,8 +10,8 @@ use crate::DeltaTableError;
 use crate::delta_datafusion::DataFusionMixins;
 use crate::errors::DeltaResult;
 use crate::kernel::{
-    Action, Add, ConflictReadSet, Metadata, Protocol, ProtocolExt as _, Remove, Transaction,
-    Version,
+    Action, Add, ConflictReadSet, Metadata, Protocol, ProtocolExt as _, Remove, Snapshot,
+    Transaction, Version,
 };
 use crate::logstore::{LogStore, get_actions};
 use crate::protocol::DeltaOperation;
@@ -93,6 +93,10 @@ pub enum CommitConflictError {
     /// Error returned when no metadata was found in the DeltaTable.
     #[error("No metadata found, please make sure table is loaded.")]
     NoMetadata,
+
+    /// A conflict check needs the active files of the read snapshot, but they were not given.
+    #[error("The active files of the read snapshot are needed to check for conflicts")]
+    ActiveFilesUnavailable,
 }
 
 /// A struct representing different attributes of current transaction needed for conflict detection.
@@ -112,8 +116,11 @@ pub(crate) struct TransactionInfo<'a> {
     read_app_ids: HashSet<String>,
     /// delta log actions that the transaction wants to commit
     actions: &'a [Action],
-    /// read [`DeltaTableState`] used for the transaction
-    read_snapshot: ConflictReadSet<'a>,
+    /// The snapshot the transaction read
+    read_snapshot: &'a Snapshot,
+    /// The active files of `read_snapshot`, when a conflict check needs them.
+    /// See [`ConflictChecker::needs_active_files`].
+    active_files: Option<ConflictReadSet<'a>>,
     /// Whether the transaction tainted the whole table
     read_whole_table: bool,
     /// Files read by the transaction, if known. Otherwise derived from `read_predicates`
@@ -123,7 +130,8 @@ pub(crate) struct TransactionInfo<'a> {
 impl<'a> TransactionInfo<'a> {
     #[cfg(feature = "datafusion")]
     pub fn try_new(
-        read_snapshot: ConflictReadSet<'a>,
+        read_snapshot: &'a Snapshot,
+        active_files: Option<ConflictReadSet<'a>>,
         read_predicates: Option<String>,
         actions: &'a [Action],
         read_whole_table: bool,
@@ -131,14 +139,14 @@ impl<'a> TransactionInfo<'a> {
         use datafusion::prelude::SessionContext;
 
         let session = SessionContext::new();
-        let log_data = read_snapshot.log_data();
         let read_predicates = read_predicates
-            .map(|pred| log_data.parse_predicate_expression(pred, &session.state()))
+            .map(|pred| read_snapshot.parse_predicate_expression(pred, &session.state()))
             .transpose()?;
 
         // read_app_ids is computed from `actions` inside Self::new; no need to duplicate it here.
         Ok(Self::new(
             read_snapshot,
+            active_files,
             read_predicates,
             actions,
             read_whole_table,
@@ -147,7 +155,8 @@ impl<'a> TransactionInfo<'a> {
 
     #[cfg(feature = "datafusion")]
     pub fn new(
-        read_snapshot: ConflictReadSet<'a>,
+        read_snapshot: &'a Snapshot,
+        active_files: Option<ConflictReadSet<'a>>,
         read_predicates: Option<Expr>,
         actions: &'a [Action],
         read_whole_table: bool,
@@ -164,6 +173,7 @@ impl<'a> TransactionInfo<'a> {
             read_app_ids,
             actions,
             read_snapshot,
+            active_files,
             read_whole_table,
             read_files: None,
         }
@@ -171,7 +181,8 @@ impl<'a> TransactionInfo<'a> {
 
     #[cfg(not(feature = "datafusion"))]
     pub fn try_new(
-        read_snapshot: ConflictReadSet<'a>,
+        read_snapshot: &'a Snapshot,
+        active_files: Option<ConflictReadSet<'a>>,
         read_predicates: Option<String>,
         actions: &'a Vec<Action>,
         read_whole_table: bool,
@@ -188,6 +199,7 @@ impl<'a> TransactionInfo<'a> {
             read_app_ids,
             actions,
             read_snapshot,
+            active_files,
             read_whole_table,
             read_files: None,
         })
@@ -212,23 +224,24 @@ impl<'a> TransactionInfo<'a> {
         use crate::delta_datafusion::files_matching_predicate;
 
         if let Some(read_files) = self.read_files {
-            Ok(Either::Left(read_files.iter().cloned()))
-        } else if let Some(predicate) = &self.read_predicates {
+            return Ok(Either::Left(read_files.iter().cloned()));
+        }
+        let active_files = self
+            .active_files
+            .as_ref()
+            .ok_or(CommitConflictError::ActiveFilesUnavailable)?
+            .log_data();
+        if let Some(predicate) = &self.read_predicates {
             Ok(Either::Right(Either::Left(
-                files_matching_predicate(
-                    self.read_snapshot.log_data(),
-                    std::slice::from_ref(predicate),
-                )
-                .map_err(|err| CommitConflictError::Predicate {
-                    source: Box::new(err),
-                })?,
+                files_matching_predicate(active_files, std::slice::from_ref(predicate)).map_err(
+                    |err| CommitConflictError::Predicate {
+                        source: Box::new(err),
+                    },
+                )?,
             )))
         } else {
             Ok(Either::Right(Either::Right(
-                self.read_snapshot
-                    .log_data()
-                    .into_iter()
-                    .map(|f| f.to_add()),
+                active_files.into_iter().map(|f| f.to_add()),
             )))
         }
     }
@@ -237,15 +250,14 @@ impl<'a> TransactionInfo<'a> {
     /// Files read by the transaction
     pub fn read_files(&self) -> Result<impl Iterator<Item = Add> + '_, CommitConflictError> {
         if let Some(read_files) = self.read_files {
-            Ok(Either::Left(read_files.iter().cloned()))
-        } else {
-            Ok(Either::Right(
-                self.read_snapshot
-                    .log_data()
-                    .into_iter()
-                    .map(|f| f.to_add()),
-            ))
+            return Ok(Either::Left(read_files.iter().cloned()));
         }
+        let active_files = self
+            .active_files
+            .as_ref()
+            .ok_or(CommitConflictError::ActiveFilesUnavailable)?
+            .log_data();
+        Ok(Either::Right(active_files.into_iter().map(|f| f.to_add())))
     }
 
     /// Whether the whole table was read during the transaction
@@ -392,7 +404,6 @@ impl<'a> ConflictChecker<'a> {
                     op,
                     &transaction_info
                         .read_snapshot
-                        .log_data()
                         .table_properties()
                         .isolation_level(),
                 ) {
@@ -404,7 +415,6 @@ impl<'a> ConflictChecker<'a> {
             .unwrap_or_else(|| {
                 transaction_info
                     .read_snapshot
-                    .log_data()
                     .table_properties()
                     .isolation_level()
             });
@@ -414,6 +424,25 @@ impl<'a> ConflictChecker<'a> {
             winning_commit_summary,
             isolation_level,
         }
+    }
+
+    /// Whether checking a transaction against `winning_commit_summary` needs the active files
+    /// of the read snapshot.
+    ///
+    /// Only [`Self::check_for_deleted_files_against_current_txn_read_files`] reads them: when
+    /// the winning commit removes data, the transaction did not read the whole table, and it
+    /// did not record the files it read.
+    pub(crate) fn needs_active_files(
+        winning_commit_summary: &WinningCommitSummary,
+        read_whole_table: bool,
+        has_read_files: bool,
+    ) -> bool {
+        !read_whole_table
+            && !has_read_files
+            && winning_commit_summary
+                .removed_files()
+                .iter()
+                .any(|r| r.data_change)
     }
 
     /// This function checks conflict of the `initial_current_transaction_info` against the
@@ -435,19 +464,11 @@ impl<'a> ConflictChecker<'a> {
         for p in self.winning_commit_summary.protocol() {
             let (win_read, curr_read) = (
                 p.min_reader_version(),
-                self.txn_info
-                    .read_snapshot
-                    .log_data()
-                    .protocol()
-                    .min_reader_version(),
+                self.txn_info.read_snapshot.protocol().min_reader_version(),
             );
             let (win_write, curr_write) = (
                 p.min_writer_version(),
-                self.txn_info
-                    .read_snapshot
-                    .log_data()
-                    .protocol()
-                    .min_writer_version(),
+                self.txn_info.read_snapshot.protocol().min_writer_version(),
             );
             // curr_read < win_read: our reader capability is below the new minimum — can't read this format.
             // curr_write < win_write: our writer capability is below the new minimum — can't safely write.
@@ -463,18 +484,8 @@ impl<'a> ConflictChecker<'a> {
             // `check_no_metadata_updates` guards: clustering, for example, carries its
             // per-column statistics requirement in a DomainMetadata action. Our transaction was
             // built without knowing about the feature, so treat it as a protocol change.
-            let curr_reader_features = self
-                .txn_info
-                .read_snapshot
-                .log_data()
-                .protocol()
-                .reader_features_set();
-            let curr_writer_features = self
-                .txn_info
-                .read_snapshot
-                .log_data()
-                .protocol()
-                .writer_features_set();
+            let curr_reader_features = self.txn_info.read_snapshot.protocol().reader_features_set();
+            let curr_writer_features = self.txn_info.read_snapshot.protocol().writer_features_set();
             let added_reader =
                 newly_enabled_features(&p.reader_features_set(), &curr_reader_features);
             let added_writer =
@@ -544,12 +555,10 @@ impl<'a> ConflictChecker<'a> {
                     &self.txn_info.read_predicates,
                     self.txn_info.read_whole_table(),
                 ) {
-                    let read_snapshot = self.txn_info.read_snapshot.log_data();
-                    let arrow_schema = read_snapshot.read_schema();
+                    let arrow_schema = self.txn_info.read_snapshot.read_schema();
                     let partition_columns = self
                         .txn_info
                         .read_snapshot
-                        .log_data()
                         .metadata()
                         .partition_columns()
                         .to_vec();
@@ -587,13 +596,6 @@ impl<'a> ConflictChecker<'a> {
     fn check_for_deleted_files_against_current_txn_read_files(
         &self,
     ) -> Result<(), CommitConflictError> {
-        // Fail if files have been deleted that the txn read.
-        let read_file_path: HashSet<String> = self
-            .txn_info
-            .read_files()?
-            .map(|f| f.path.clone())
-            .collect();
-
         // Only consider removals with data_change = true as conflicts.
         // Removals with data_change = false (e.g., from OPTIMIZE/compaction)
         // don't change the logical data, only the physical layout, so they
@@ -604,13 +606,22 @@ impl<'a> ConflictChecker<'a> {
             .into_iter()
             .filter(|r| r.data_change)
             .collect();
+        if removed_files_with_data_change.is_empty() {
+            return Ok(());
+        }
+        if self.txn_info.read_whole_table() {
+            return Err(CommitConflictError::ConcurrentDeleteRead);
+        }
 
-        let deleted_read_overlap = removed_files_with_data_change
+        // Fail if files have been deleted that the txn read.
+        let read_file_path: HashSet<String> = self
+            .txn_info
+            .read_files()?
+            .map(|f| f.path.clone())
+            .collect();
+        if removed_files_with_data_change
             .iter()
-            .find(|f| read_file_path.contains(&f.path));
-
-        if deleted_read_overlap.is_some()
-            || (!removed_files_with_data_change.is_empty() && self.txn_info.read_whole_table())
+            .any(|f| read_file_path.contains(&f.path))
         {
             Err(CommitConflictError::ConcurrentDeleteRead)
         } else {
@@ -801,9 +812,15 @@ mod tests {
         let setup_actions = setup.unwrap_or_else(init_table_actions);
         let state = DeltaTableState::from_actions(setup_actions).await.unwrap();
         let snapshot = state.snapshot();
-        let conflict_read_set = ConflictReadSet::from_log_data_for_test(snapshot.log_data());
-        let transaction_info =
-            TransactionInfo::new(conflict_read_set, reads, &actions, read_whole_table);
+        let active_files =
+            ConflictReadSet::from_log_data_for_test(snapshot.try_materialized_log_data().unwrap());
+        let transaction_info = TransactionInfo::new(
+            snapshot,
+            Some(active_files),
+            reads,
+            &actions,
+            read_whole_table,
+        );
         let summary = WinningCommitSummary {
             actions: concurrent,
             commit_info: None,
@@ -1395,6 +1412,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_active_files_are_needed_only_for_a_concurrent_data_remove() {
+        use crate::table::state::DeltaTableState;
+
+        let file = simple_add(true, "1", "10");
+        let mut setup_actions = init_table_actions();
+        setup_actions.push(file.clone().into());
+        let state = DeltaTableState::from_actions(setup_actions).await.unwrap();
+        let actions = vec![simple_add(true, "100", "200").into()];
+        let check = |winning: Vec<Action>| {
+            let summary = WinningCommitSummary {
+                actions: winning,
+                commit_info: None,
+            };
+            let needed = ConflictChecker::needs_active_files(&summary, false, false);
+            let transaction_info =
+                TransactionInfo::new(state.snapshot(), None, None, &actions, false);
+            let result = ConflictChecker::new(transaction_info, summary, None).check_conflicts();
+            (needed, result)
+        };
+
+        // A concurrent append does not need the active files.
+        let (needed, result) = check(vec![simple_add(true, "300", "400").into()]);
+        assert!(!needed);
+        assert!(result.is_ok());
+
+        // A concurrent remove without data change does not need them.
+        let (needed, result) = check(vec![ActionFactory::remove(&file, false).into()]);
+        assert!(!needed);
+        assert!(result.is_ok());
+
+        // A concurrent data remove needs them, and the check fails when they are missing.
+        let (needed, result) = check(vec![ActionFactory::remove(&file, true).into()]);
+        assert!(needed);
+        assert!(matches!(
+            result,
+            Err(CommitConflictError::ActiveFilesUnavailable)
+        ));
+    }
+
+    #[tokio::test]
     #[cfg(feature = "datafusion")]
     async fn test_explicit_read_files_still_conflict_when_read_whole_table() {
         use crate::table::state::DeltaTableState;
@@ -1405,11 +1462,9 @@ mod tests {
         setup_actions.push(file_read.clone().into());
         setup_actions.push(file_unread.clone().into());
         let state = DeltaTableState::from_actions(setup_actions).await.unwrap();
-        let conflict_read_set =
-            ConflictReadSet::from_log_data_for_test(state.snapshot().log_data());
         let actions = vec![simple_add(true, "1", "10").into()];
         let read_files = [file_read];
-        let transaction_info = TransactionInfo::new(conflict_read_set, None, &actions, true)
+        let transaction_info = TransactionInfo::new(state.snapshot(), None, None, &actions, true)
             .with_read_files(Some(&read_files));
         let summary = WinningCommitSummary {
             actions: vec![ActionFactory::remove(&file_unread, true).into()],

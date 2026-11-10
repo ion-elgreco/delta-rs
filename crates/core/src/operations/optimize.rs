@@ -53,9 +53,9 @@ use crate::delta_datafusion::{
     create_session_state_with_spill_config, resolve_session_state, update_datafusion_session,
 };
 use crate::errors::{ColumnMappingOperation, DeltaResult, DeltaTableError};
+use crate::kernel::resolve_snapshot;
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, DEFAULT_RETRIES, PROTOCOL};
-use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, StructType, Version};
-use crate::kernel::{EagerSnapshot, resolve_snapshot};
+use crate::kernel::{Action, Add, DataType, PartitionsExt, Remove, Snapshot, StructType, Version};
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef, ObjectStoreRef};
 use crate::protocol::DeltaOperation;
@@ -280,7 +280,7 @@ pub enum OptimizeType {
 /// table's configuration is read. Otherwise a default value is used.
 pub struct OptimizeBuilder<'a> {
     /// A snapshot of the to-be-optimized table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Filters to select specific table partitions to be optimized
@@ -303,7 +303,7 @@ pub struct OptimizeBuilder<'a> {
 
 impl<'a> OptimizeBuilder<'a> {
     /// Create a new [`OptimizeBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,
@@ -622,15 +622,15 @@ type ParquetReadStream = BoxStream<'static, Result<RecordBatch, ParquetError>>;
 
 #[derive(Clone)]
 struct SelectedFileScanFactory {
-    snapshot: EagerSnapshot,
+    snapshot: Arc<Snapshot>,
     log_store: LogStoreRef,
     scan_config: DeltaScanConfig,
 }
 
 impl SelectedFileScanFactory {
-    fn new(snapshot: &EagerSnapshot, log_store: LogStoreRef, scan_config: DeltaScanConfig) -> Self {
+    fn new(snapshot: &Snapshot, log_store: LogStoreRef, scan_config: DeltaScanConfig) -> Self {
         Self {
-            snapshot: snapshot.clone(),
+            snapshot: Arc::new(snapshot.clone()),
             log_store,
             scan_config,
         }
@@ -807,7 +807,7 @@ impl MergePlan {
     pub async fn execute(
         mut self,
         log_store: LogStoreRef,
-        snapshot: &EagerSnapshot,
+        snapshot: &Snapshot,
         max_concurrent_tasks: usize,
         min_commit_interval: Option<Duration>,
         commit_properties: CommitProperties,
@@ -986,7 +986,7 @@ impl MergePlan {
                         self.task_parameters.input_parameters.clone().try_into()?,
                     )
                     .await?;
-                snapshot = commit.snapshot().snapshot;
+                snapshot = commit.snapshot().snapshot().as_ref().clone();
                 commits_made += 1;
             }
 
@@ -1013,7 +1013,7 @@ impl MergePlan {
 pub async fn create_merge_plan(
     log_store: &dyn LogStore,
     optimize_type: OptimizeType,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     filters: &[FilterLiteral<'_>],
     target_size: Option<NonZeroU64>,
     writer_properties: DeltaWriterProperties,
@@ -1205,7 +1205,7 @@ fn plan_compaction_bins_in_stable_order(
 
 async fn build_compaction_plan(
     log_store: &dyn LogStore,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     filters: &[FilterLiteral<'_>],
     target_size: NonZeroU64,
 ) -> Result<(OptimizeOperations, Metrics, PlannerStats), DeltaTableError> {
@@ -1320,7 +1320,7 @@ fn validate_zorder_column(schema: &StructType, column: &str) -> Result<(), Delta
 async fn build_zorder_plan(
     log_store: &dyn LogStore,
     zorder_columns: Vec<String>,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     partition_keys: &[String],
     filters: &[FilterLiteral<'_>],
 ) -> Result<(OptimizeOperations, Metrics, PlannerStats), DeltaTableError> {

@@ -187,7 +187,10 @@ async fn test_update_no_predicate() {
 
     let table = write_batch(table, batch).await;
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
 
     let (table, metrics) = table
         .update()
@@ -196,7 +199,10 @@ async fn test_update_no_predicate() {
         .unwrap();
 
     assert_eq!(table.version(), Some(2));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 4);
@@ -241,7 +247,10 @@ async fn test_update_non_partition() {
 
     let table = write_batch(table, batch).await;
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
 
     let (table, metrics) = table
         .update()
@@ -251,7 +260,10 @@ async fn test_update_non_partition() {
         .unwrap();
 
     assert_eq!(table.version(), Some(2));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 2);
@@ -297,7 +309,10 @@ async fn test_update_partitions() {
 
     let table = write_batch(table, batch.clone()).await;
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        2
+    );
 
     let (table, metrics) = table
         .update()
@@ -308,7 +323,10 @@ async fn test_update_partitions() {
         .unwrap();
 
     assert_eq!(table.version(), Some(2));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        2
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 2);
@@ -332,7 +350,10 @@ async fn test_update_partitions() {
     let table = setup_table(Some(vec!["modified"])).await;
     let table = write_batch(table, batch).await;
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        2
+    );
 
     let (table, metrics) = table
         .update()
@@ -347,7 +368,10 @@ async fn test_update_partitions() {
         .unwrap();
 
     assert_eq!(table.version(), Some(2));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 3);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        3
+    );
     assert_eq!(metrics.num_added_files, 2);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 1);
@@ -444,7 +468,10 @@ async fn test_update_case_sensitive() {
 async fn test_update_null() {
     let table = prepare_values_table().await;
     assert_eq!(table.version(), Some(0));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
 
     let (table, metrics) = table
         .update()
@@ -452,7 +479,10 @@ async fn test_update_null() {
         .await
         .unwrap();
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 5);
@@ -482,7 +512,10 @@ async fn test_update_null() {
         .await
         .unwrap();
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 2);
@@ -517,7 +550,10 @@ async fn test_update_null() {
         .await
         .unwrap();
     assert_eq!(table.version(), Some(1));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     assert_eq!(metrics.num_added_files, 1);
     assert_eq!(metrics.num_removed_files, 1);
     assert_eq!(metrics.num_updated_rows, 2);
@@ -758,7 +794,10 @@ async fn test_update_with_array_that_must_be_coerced() {
 async fn test_no_cdc_on_older_tables() {
     let table = prepare_values_table().await;
     assert_eq!(table.version(), Some(0));
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
 
     let schema = Arc::new(Schema::new(vec![Field::new(
         "value",

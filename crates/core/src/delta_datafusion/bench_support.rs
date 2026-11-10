@@ -9,7 +9,7 @@ use datafusion::datasource::MemTable;
 use datafusion::logical_expr::{Expr, LogicalPlan};
 
 use crate::errors::DeltaResult;
-use crate::kernel::{Add, EagerSnapshot};
+use crate::kernel::{Add, EagerSnapshot, Snapshot};
 use crate::logstore::LogStoreRef;
 
 use super::DeltaSessionExt as _;
@@ -53,35 +53,35 @@ fn prepare_session(session: &dyn Session, log_store: &LogStoreRef) -> DeltaResul
 }
 
 pub async fn find_files(
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     log_store: LogStoreRef,
     session: &dyn Session,
     predicate: Option<Expr>,
 ) -> DeltaResult<FindFilesResult> {
     prepare_session(session, &log_store)?;
-    super::find_files(snapshot.snapshot(), log_store, session, predicate)
+    super::find_files(snapshot, log_store, session, predicate)
         .await
         .map(Into::into)
 }
 
 pub async fn find_files_scan(
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     log_store: LogStoreRef,
     session: &dyn Session,
     predicate: Expr,
 ) -> DeltaResult<Vec<Add>> {
     prepare_session(session, &log_store)?;
-    super::find_files_scan(snapshot.snapshot(), log_store, session, predicate).await
+    super::find_files_scan(snapshot, log_store, session, predicate).await
 }
 
 pub async fn scan_files_where_matches(
     session: &dyn Session,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     log_store: LogStoreRef,
     predicate: Expr,
 ) -> DataFusionResult<Option<MatchedFilesScan>> {
     prepare_session(session, &log_store)?;
-    super::scan_files_where_matches(session, snapshot.snapshot(), log_store, predicate)
+    super::scan_files_where_matches(session, snapshot, log_store, predicate)
         .await
         .map(|scan| scan.map(MatchedFilesScan))
 }

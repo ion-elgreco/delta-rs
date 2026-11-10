@@ -558,6 +558,65 @@ impl<'de> Visitor<'de> for EagerSnapshotVisitor {
     }
 }
 
+/// Serialization of the snapshot that a [`DeltaTableState`](crate::table::state::DeltaTableState)
+/// holds.
+///
+/// The format is the one of [`EagerSnapshot`], so that tables serialized by earlier releases
+/// stay readable. Active files are optional: a payload without them gives a snapshot that
+/// reads them from the log.
+pub(crate) mod table_state_serde {
+    use super::*;
+
+    pub(crate) fn serialize<S>(snapshot: &Arc<Snapshot>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_seq(None)?;
+        seq.serialize_element(snapshot.as_ref())?;
+        seq.end()
+    }
+
+    struct TableStateSnapshotVisitor;
+
+    impl<'de> Visitor<'de> for TableStateSnapshotVisitor {
+        type Value = Arc<Snapshot>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("the snapshot of a table state")
+        }
+
+        fn visit_seq<V>(self, mut seq: V) -> Result<Arc<Snapshot>, V::Error>
+        where
+            V: SeqAccess<'de>,
+        {
+            let decoded: DeserializedSnapshot = seq
+                .next_element()?
+                .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+            let snapshot = Arc::new(decoded.snapshot);
+            let legacy_payload: Option<Vec<u8>> = seq.next_element()?;
+            match materialized_files_from_legacy_eager_payload(
+                snapshot.as_ref(),
+                legacy_payload,
+                decoded.legacy_config.as_ref(),
+            )
+            .map_err(de::Error::custom)?
+            {
+                Some(materialized_files) if snapshot.materialized_files().is_none() => Ok(
+                    Arc::new(snapshot.with_materialized_files(Some(materialized_files))),
+                ),
+                _ => Ok(snapshot),
+            }
+        }
+    }
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Snapshot>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(TableStateSnapshotVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for EagerSnapshot {
     fn deserialize<D>(deserializer: D) -> Result<EagerSnapshot, D::Error>
     where

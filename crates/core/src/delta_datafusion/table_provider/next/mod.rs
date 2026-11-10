@@ -785,10 +785,8 @@ impl TableProvider for DeltaScan {
         super::update_datafusion_session(state, log_store.as_ref())?;
 
         let snapshot = match &self.snapshot {
-            SnapshotWrapper::EagerSnapshot(esnap) => esnap.as_ref().clone(),
-            SnapshotWrapper::Snapshot(snap) => {
-                EagerSnapshot::try_new_with_snapshot(log_store.as_ref(), snap.clone()).await?
-            }
+            SnapshotWrapper::EagerSnapshot(esnap) => esnap.as_ref().clone().into_snapshot(),
+            SnapshotWrapper::Snapshot(snap) => snap.clone(),
         };
 
         let save_mode = match insert_op {
@@ -1116,7 +1114,7 @@ mod tests {
     async fn test_direct_scan_rejects_unsupported_reader_protocol() -> TestResult {
         let table = create_in_memory_id_table_with_unsupported_reader_protocol().await?;
         let err = DeltaScan::new(
-            table.snapshot()?.snapshot().snapshot().clone(),
+            table.snapshot()?.snapshot().clone(),
             DeltaScanConfig::default(),
         )
         .unwrap_err();
@@ -1134,7 +1132,7 @@ mod tests {
     async fn test_builder_rejects_unsupported_reader_protocol() -> TestResult {
         let table = create_in_memory_id_table_with_unsupported_reader_protocol().await?;
         let err = DeltaScan::builder()
-            .with_snapshot(table.snapshot()?.snapshot().snapshot().clone())
+            .with_snapshot(table.snapshot()?.snapshot().clone())
             .build()
             .await
             .unwrap_err();
@@ -1392,7 +1390,7 @@ mod tests {
     #[tokio::test]
     async fn test_insert_into_requires_log_store() -> TestResult {
         let table = create_in_memory_id_table().await?;
-        let snapshot = table.snapshot()?.snapshot().snapshot().clone();
+        let snapshot = table.snapshot()?.snapshot().clone();
         let provider = DeltaScan::builder().with_snapshot(snapshot).build().await?;
 
         let session = Arc::new(create_session().into_inner());
@@ -1605,7 +1603,7 @@ mod tests {
             .with_save_mode(crate::protocol::SaveMode::Append)
             .await?;
         let provider = DeltaScan::new(
-            table.snapshot()?.snapshot().snapshot().clone(),
+            table.snapshot()?.snapshot().clone(),
             DeltaScanConfig::default(),
         )?
         .with_log_store(table.log_store());
@@ -1683,7 +1681,7 @@ mod tests {
             .with_partition_columns(["p", "q"])
             .await?;
         let provider = DeltaScan::new(
-            table.snapshot()?.snapshot().snapshot().clone(),
+            table.snapshot()?.snapshot().clone(),
             DeltaScanConfig::default(),
         )?
         .with_log_store(table.log_store());
@@ -1731,7 +1729,7 @@ mod tests {
             .with_save_mode(crate::protocol::SaveMode::Append)
             .await?;
         let provider = DeltaScan::new(
-            table.snapshot()?.snapshot().snapshot().clone(),
+            table.snapshot()?.snapshot().clone(),
             DeltaScanConfig::default(),
         )?
         .with_log_store(table.log_store());
@@ -1822,7 +1820,7 @@ mod tests {
     async fn test_direct_scan_with_log_store_registers_fresh_session() -> TestResult {
         let table = create_in_memory_id_table_with_rows(vec![11, 13]).await?;
         let provider = DeltaScan::new(
-            table.snapshot()?.snapshot().snapshot().clone(),
+            table.snapshot()?.snapshot().clone(),
             DeltaScanConfig::default(),
         )?
         .with_log_store(table.log_store());
@@ -2586,7 +2584,7 @@ mod tests {
         let table = create_in_memory_id_table_with_rows(vec![1, 2]).await?;
         let log_store = table.log_store();
         let old_version = table.version();
-        let old_snapshot = table.snapshot()?.snapshot().snapshot().clone();
+        let old_snapshot = table.snapshot()?.snapshot().clone();
         let selected_path = old_snapshot
             .file_views(log_store.as_ref(), None)
             .take(1)
@@ -2629,7 +2627,7 @@ mod tests {
         assert_batches_sorted_eq!(&expected, &old_batches);
 
         let latest_provider = DeltaScan::builder()
-            .with_snapshot(latest_table.snapshot()?.snapshot().snapshot().clone())
+            .with_snapshot(latest_table.snapshot()?.snapshot().clone())
             .with_log_store(log_store)
             .build()
             .await?

@@ -8,16 +8,15 @@ use delta_kernel::engine::arrow_conversion::TryIntoArrow as _;
 use delta_kernel::table_features::TableFeature;
 use tracing::debug;
 
+use crate::kernel::Snapshot;
 use crate::{
-    DeltaResult,
-    delta_datafusion::expr::parse_generated_column_expression,
-    kernel::{DataCheck, EagerSnapshot},
+    DeltaResult, delta_datafusion::expr::parse_generated_column_expression, kernel::DataCheck,
     table::GeneratedColumn,
 };
 
 /// check if the writer version is able to write generated columns
 #[inline]
-pub fn gc_is_enabled(snapshot: &EagerSnapshot) -> bool {
+pub fn gc_is_enabled(snapshot: &Snapshot) -> bool {
     snapshot
         .table_configuration()
         .is_feature_enabled(&TableFeature::GeneratedColumns)

@@ -72,14 +72,13 @@ use crate::delta_datafusion::logical::{
 };
 use crate::delta_datafusion::physical::{MetricObserverExec, find_metric_node, get_metric};
 use crate::delta_datafusion::{
-    Expression, create_session, resolve_session_state, scan_files_where_matches,
-    try_materialized_add_actions_partition_mem_table, update_datafusion_session,
+    Expression, add_actions_partition_mem_table, create_session, resolve_session_state,
+    scan_files_where_matches, update_datafusion_session,
 };
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
 use crate::kernel::{
-    Action, ActiveAddOptions, AddStatsPolicy, EagerSnapshot, LogicalFileView, Snapshot,
-    resolve_snapshot,
+    Action, ActiveAddOptions, AddStatsPolicy, LogicalFileView, Snapshot, resolve_snapshot,
 };
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef};
@@ -99,7 +98,7 @@ pub struct DeleteBuilder {
     /// Which records to delete
     predicate: Option<Expression>,
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Datafusion session state relevant for executing the input plan
@@ -217,7 +216,7 @@ async fn collect_full_file_deletes(
 
 impl DeleteBuilder {
     /// Create a new [`DeleteBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             predicate: None,
             snapshot,
@@ -429,12 +428,11 @@ impl ExtensionPlanner for DeleteMetricExtensionPlanner {
 async fn execute(
     predicate: Option<Expr>,
     log_store: LogStoreRef,
-    snapshot: EagerSnapshot,
+    snapshot: Arc<Snapshot>,
     session: &dyn Session,
     writer_properties: DeltaWriterProperties,
 ) -> DeltaResult<(Vec<Action>, DeleteMetrics)> {
-    let eager_snapshot = snapshot;
-    let snapshot = eager_snapshot.snapshot();
+    let snapshot: &Snapshot = &snapshot;
     let exec_start = Instant::now();
     let mut metrics = DeleteMetrics {
         num_removed_files: 0,
@@ -506,6 +504,7 @@ async fn execute(
                     find_file_paths_by_partition_predicate_datafusion(
                         session,
                         snapshot,
+                        log_store.as_ref(),
                         &partition_predicate,
                     )
                     .await?,
@@ -598,7 +597,7 @@ async fn execute(
         }),
     });
 
-    let (write_plan, write_cdc) = if should_write_cdc(&eager_snapshot)? {
+    let (write_plan, write_cdc) = if should_write_cdc(snapshot)? {
         // create change set entries for all records we deleted
         let cdc_deletes = files_scan
             .scan()
@@ -656,6 +655,7 @@ async fn execute(
 async fn find_file_paths_by_partition_predicate_datafusion(
     session: &dyn Session,
     snapshot: &Snapshot,
+    log_store: &dyn LogStore,
     predicate: &Expr,
 ) -> DeltaResult<std::collections::HashSet<String>> {
     use arrow_array::StringArray;
@@ -667,7 +667,7 @@ async fn find_file_paths_by_partition_predicate_datafusion(
     use datafusion::datasource::provider_as_source;
     use datafusion::physical_plan::collect;
 
-    let Some(mem_table) = try_materialized_add_actions_partition_mem_table(snapshot)? else {
+    let Some(mem_table) = add_actions_partition_mem_table(snapshot, log_store).await? else {
         return Ok(std::collections::HashSet::new());
     };
 
@@ -905,13 +905,19 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 1);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let (table, metrics) = table.delete().await.unwrap();
         let state = table.snapshot().unwrap();
 
         assert_eq!(state.version(), 2);
-        assert_eq!(state.log_data().num_files(), 0);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            0
+        );
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, Some(4));
@@ -951,7 +957,7 @@ mod tests {
 
         let store = table.log_store().object_store();
         let mut footers = vec![];
-        for add in table.snapshot().unwrap().log_data() {
+        for add in table.eager_snapshot().await.unwrap().log_data() {
             let path = add.object_store_path();
             let reader = ParquetObjectReader::new(store.clone(), path.clone());
             let builder = ParquetRecordBatchStreamBuilder::new(reader).await.unwrap();
@@ -1013,13 +1019,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, Some(4));
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 0);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 0);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert_eq!(operation_metrics.get("num_deleted_rows"), Some(&json!(4)));
@@ -1043,13 +1048,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 0);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 0);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert!(!operation_metrics.contains_key("num_deleted_rows"));
@@ -1073,13 +1077,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 0);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 0);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert!(!operation_metrics.contains_key("num_deleted_rows"));
@@ -1119,7 +1122,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 1);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let batch = RecordBatch::try_new(
             Arc::clone(&schema),
@@ -1144,7 +1150,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 2);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let (table, metrics) = table
             .delete()
@@ -1153,7 +1162,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 3);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         assert_eq!(metrics.num_added_files, 1);
         assert_eq!(metrics.num_removed_files, 1);
@@ -1342,7 +1354,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 1);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let (table, metrics) = table
             .delete()
@@ -1351,7 +1366,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 2);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
@@ -1389,13 +1407,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().with_predicate("part = 'a'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, Some(3));
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert_eq!(operation_metrics.get("num_deleted_rows"), Some(&json!(3)));
@@ -1417,13 +1434,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().with_predicate("part = 'a'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, Some(7));
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert_eq!(operation_metrics.get("num_deleted_rows"), Some(&json!(7)));
@@ -1444,13 +1460,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().with_predicate("part = 'a'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert!(!operation_metrics.contains_key("num_deleted_rows"));
@@ -1473,13 +1488,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().with_predicate("part = 'a'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 2);
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert!(!operation_metrics.contains_key("num_deleted_rows"));
@@ -1501,14 +1515,13 @@ mod tests {
         let original_version = table.version();
 
         let (table, metrics) = table.delete().with_predicate("part = 'z'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(table.version(), original_version);
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 0);
         assert_eq!(metrics.num_deleted_rows, Some(0));
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 2);
 
         Ok(())
     }
@@ -1527,13 +1540,12 @@ mod tests {
         .await?;
 
         let (table, metrics) = table.delete().with_predicate("part = 'a'").await?;
-        let state = table.snapshot()?;
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert!(!operation_metrics.contains_key("num_deleted_rows"));
@@ -1670,8 +1682,7 @@ mod tests {
             )
             .await?;
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 3);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 3);
 
         let (table, metrics) = table.delete().with_predicate("dt < '2025-11-13'").await?;
 
@@ -1681,8 +1692,7 @@ mod tests {
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         Ok(())
     }
@@ -1808,8 +1818,7 @@ mod tests {
             )
             .await?;
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 3);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 3);
 
         let (table, metrics) = table.delete().with_predicate("dt < '2025-11-13'").await?;
 
@@ -1820,8 +1829,7 @@ mod tests {
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 2);
 
         Ok(())
     }
@@ -1899,8 +1907,7 @@ mod tests {
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         Ok(())
     }
@@ -1970,9 +1977,8 @@ mod tests {
         assert_eq!(metrics.num_deleted_rows, None);
         assert_eq!(metrics.num_copied_rows, 0);
 
-        let state = table.snapshot()?;
         assert_eq!(
-            state.log_data().num_files(),
+            table.eager_snapshot().await?.log_data().num_files(),
             action_count - expected_removed
         );
 
@@ -2046,8 +2052,7 @@ mod tests {
         assert_eq!(metrics.num_deleted_rows, Some(6));
         assert_eq!(metrics.num_copied_rows, 0);
 
-        let state = table.snapshot()?;
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 1);
 
         let operation_metrics = last_delete_operation_metrics(&table).await;
         assert_eq!(operation_metrics.get("num_deleted_rows"), Some(&json!(6)));
@@ -2085,7 +2090,10 @@ mod tests {
 
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 1);
-        assert_eq!(state.log_data().num_files(), 3);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            3
+        );
 
         let (table, metrics) = table
             .delete()
@@ -2099,7 +2107,10 @@ mod tests {
 
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 2);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         assert_eq!(metrics.num_added_files, 0);
         assert_eq!(metrics.num_removed_files, 1);

@@ -107,7 +107,7 @@ pub async fn compact_logs(
     start_version: u64,
     end_version: u64,
 ) -> DeltaResult<()> {
-    let snapshot = table.snapshot()?.snapshot().snapshot().clone();
+    let snapshot = table.snapshot()?.snapshot().clone();
     with_operation(&table.log_store(), |log_store| async move {
         compact_logs_for(start_version, end_version, log_store.as_ref(), &snapshot).await
     })

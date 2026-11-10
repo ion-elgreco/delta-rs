@@ -4,7 +4,7 @@
 
 use crate::DeltaResult;
 use crate::delta_datafusion::logical::{LogicalPlanBuilderExt as _, LogicalPlanExt as _};
-use crate::kernel::EagerSnapshot;
+use crate::kernel::Snapshot;
 use crate::table::config::TablePropertiesExt as _;
 
 use datafusion::common::ScalarValue;
@@ -69,7 +69,7 @@ impl CDCTracker {
 /// > For Writer Version 7, all writers must respect the delta.enableChangeDataFeed configuration flag in
 /// > the metadata of the table only if the feature changeDataFeed exists in the table protocol's
 /// > writerFeatures.
-pub(crate) fn should_write_cdc(snapshot: &EagerSnapshot) -> DeltaResult<bool> {
+pub(crate) fn should_write_cdc(snapshot: &Snapshot) -> DeltaResult<bool> {
     if let Some(features) = &snapshot.protocol().writer_features() {
         // Features should only exist at writer version 7 but to avoid cases where
         // the Option<HashSet<T>> can get filled with an empty set, checking for the value

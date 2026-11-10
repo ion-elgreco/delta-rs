@@ -1611,7 +1611,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let snapshot = table.eager_snapshot().await.unwrap();
         let log_data = snapshot.log_data();
 
         // Without a predicate all files are returned.
@@ -1699,7 +1699,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = table.snapshot().unwrap().snapshot().clone();
+        let snapshot = table.eager_snapshot().await.unwrap();
         let log_data = snapshot.log_data();
 
         // A `>` predicate on a binary column must keep all files — there are no

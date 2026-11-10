@@ -14,11 +14,12 @@ use datafusion_datasource::sink::DataSink;
 use futures::{StreamExt as _, TryStreamExt as _};
 use itertools::Itertools as _;
 
+use crate::kernel::Snapshot;
 use crate::{
     cast_record_batch,
     datafile::{DeltaWriterProperties, writer::WriterConfig},
     delta_datafusion::{ColumnMappingState, DataFusionMixins as _},
-    kernel::{Action, EagerSnapshot, transaction::CommitBuilder},
+    kernel::{Action, transaction::CommitBuilder},
     logstore::{LogStoreRef, with_operation},
     operations::write::execution::write_streams,
     protocol::{DeltaOperation, SaveMode},
@@ -32,7 +33,7 @@ pub struct DeltaDataSink {
     /// The log store
     log_store: LogStoreRef,
     /// The snapshot
-    snapshot: EagerSnapshot,
+    snapshot: Arc<Snapshot>,
     /// The save mode
     save_mode: SaveMode,
     /// The schema
@@ -49,7 +50,7 @@ pub struct DeltaDataSink {
 /// transaction log access, snapshot state, and session configuration.
 impl DeltaDataSink {
     /// Create a new [`DeltaDataSink`]
-    pub fn new(log_store: LogStoreRef, snapshot: EagerSnapshot, save_mode: SaveMode) -> Self {
+    pub fn new(log_store: LogStoreRef, snapshot: Arc<Snapshot>, save_mode: SaveMode) -> Self {
         Self {
             log_store,
             schema: snapshot.read_schema(),

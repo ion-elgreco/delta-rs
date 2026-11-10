@@ -16,7 +16,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use self::state::DeltaTableState;
-use crate::kernel::{CommitInfo, DataCheck, LogicalFileView, Snapshot, Version};
+use crate::kernel::{
+    ActiveAddOptions, AddStatsPolicy, CommitInfo, DataCheck, EagerSnapshot, LogicalFileView,
+    Snapshot, Version,
+};
 use crate::logstore::{LogStoreConfig, LogStoreRef, ObjectStoreRef};
 use crate::partitions::FilterLiteral;
 use crate::{DeltaResult, DeltaTableBuilder, DeltaTableError};
@@ -245,15 +248,9 @@ impl DeltaTable {
         };
         let log_store = self.log_store();
         Box::pin(
-            once(async move {
-                state
-                    .snapshot()
-                    .snapshot()
-                    .commit_infos(&log_store, limit)
-                    .await
-            })
-            .try_flatten()
-            .try_filter_map(|info| ready(Ok(info))),
+            once(async move { state.snapshot().commit_infos(&log_store, limit).await })
+                .try_flatten()
+                .try_filter_map(|info| ready(Ok(info))),
         )
     }
 
@@ -341,16 +338,38 @@ impl DeltaTable {
             .collect())
     }
 
-    /// Returns a URIs for all active files present in the current table version.
-    pub fn get_file_uris(&self) -> DeltaResult<impl Iterator<Item = String> + '_> {
-        Ok(self
-            .state
-            .as_ref()
-            .ok_or(DeltaTableError::NotInitialized)?
-            .log_data()
-            .into_iter()
-            .map(|add| add.object_store_path())
-            .map(|path| self.log_store.to_uri(&path)))
+    /// Returns the URIs for all active files present in the current table version.
+    ///
+    /// The files are read from the log on each call.
+    pub async fn get_file_uris(&self) -> DeltaResult<impl Iterator<Item = String> + '_> {
+        let state = self.state.as_ref().ok_or(DeltaTableError::NotInitialized)?;
+        let paths: Vec<Path> = state
+            .snapshot()
+            .active_adds(
+                self.log_store.as_ref(),
+                ActiveAddOptions {
+                    predicate: None,
+                    stats: AddStatsPolicy::None,
+                },
+            )
+            .map_ok(|add| add.object_store_path())
+            .try_collect()
+            .await?;
+        Ok(paths.into_iter().map(|path| self.log_store.to_uri(&path)))
+    }
+
+    /// Read the active files of the currently loaded table version into memory.
+    ///
+    /// The returned [`EagerSnapshot`] gives synchronous access to the files, for example
+    /// through [`EagerSnapshot::log_data`]. The table itself does not keep them.
+    ///
+    /// ## Errors
+    ///
+    /// Returns [`NotInitialized`](DeltaTableError::NotInitialized) if the table has not been initialized.
+    pub async fn eager_snapshot(&self) -> DeltaResult<EagerSnapshot> {
+        self.snapshot()?
+            .eager_snapshot(self.log_store.as_ref())
+            .await
     }
 
     /// Returns the currently loaded state snapshot.
@@ -507,13 +526,18 @@ mod tests {
         let state = table_fields[0].as_object_mut().unwrap();
         state.insert(
             "snapshot".to_string(),
-            legacy_eager_snapshot_payload(dt.state.as_ref().unwrap().snapshot()),
+            legacy_eager_snapshot_payload(&dt.eager_snapshot().await.unwrap()),
         );
 
         let actual: DeltaTable = serde_json::from_value(value).unwrap();
         assert_eq!(
-            actual.snapshot().unwrap().log_data().num_files(),
-            dt.snapshot().unwrap().log_data().num_files()
+            actual
+                .eager_snapshot()
+                .await
+                .unwrap()
+                .log_data()
+                .num_files(),
+            dt.eager_snapshot().await.unwrap().log_data().num_files()
         );
         drop(tmp_dir);
     }
@@ -540,26 +564,71 @@ mod tests {
         value.as_array_mut().unwrap().insert(1, config);
         let actual: DeltaTable = serde_json::from_value(value).unwrap();
         assert_eq!(actual.version(), Some(1));
-        assert_eq!(actual.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            actual
+                .snapshot()
+                .unwrap()
+                .snapshot()
+                .try_materialized_log_data()
+                .unwrap()
+                .num_files(),
+            1
+        );
         assert_eq!(actual.table_url(), table.table_url());
     }
 
+    /// Loading a table, adding a column, and appending data must not read the active files
+    /// into the table state. `eager_snapshot` reads them and leaves the table state as it is.
+    #[cfg(feature = "datafusion")]
     #[tokio::test]
-    async fn table_without_files_does_not_panic_on_log_data() {
-        let (dt, _tmp_dir) = create_test_table().await;
-        let url = dt.table_url().clone();
+    async fn load_schema_change_and_append_do_not_hold_active_files() {
+        use arrow_array::{Int32Array, RecordBatch, StringArray};
 
-        let table = DeltaTableBuilder::from_url(url)
+        fn holds_active_files(table: &DeltaTable) -> bool {
+            let state = table.snapshot().unwrap();
+            state.snapshot().has_materialized_files_for_test()
+        }
+        fn batch(table: &DeltaTable) -> RecordBatch {
+            let schema = table.snapshot().unwrap().snapshot().arrow_schema();
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(Int32Array::from(vec![1])),
+                    Arc::new(StringArray::from(vec!["a"])),
+                    Arc::new(StringArray::from(vec![None::<&str>])),
+                ],
+            )
+            .unwrap()
+        }
+
+        let (dt, _tmp_dir) = create_test_table().await;
+        let table = DeltaTableBuilder::from_url(dt.table_url().clone())
             .unwrap()
             .load()
             .await
             .unwrap();
+        assert!(!holds_active_files(&table));
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            table.snapshot().unwrap().log_data().num_files()
-        }));
+        let table = table
+            .add_columns()
+            .with_fields([StructField::new(
+                "Extra".to_string(),
+                DataType::Primitive(PrimitiveType::String),
+                true,
+            )])
+            .await
+            .unwrap();
+        assert!(!holds_active_files(&table));
 
-        assert!(result.is_ok());
+        let table = table.clone().write(vec![batch(&table)]).await.unwrap();
+        let table = table.clone().write(vec![batch(&table)]).await.unwrap();
+        assert_eq!(table.version(), Some(3));
+        assert!(!holds_active_files(&table));
+
+        let eager = table.eager_snapshot().await.unwrap();
+        assert_eq!(eager.log_data().num_files(), 2);
+        assert_eq!(table.get_file_uris().await.unwrap().count(), 2);
+        assert!(!holds_active_files(&table));
     }
 
     /// Copying a table resets the modification times of its log files, so time travel by

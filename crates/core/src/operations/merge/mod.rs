@@ -92,7 +92,7 @@ use crate::delta_datafusion::{Expression, into_expr, maybe_into_expr};
 use crate::kernel::schema::cast::{merge_arrow_field, merge_arrow_schema};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, PROTOCOL};
 use crate::kernel::{
-    Action, ActiveAddOptions, AddStatsPolicy, EagerSnapshot, StructTypeExt, new_metadata,
+    Action, ActiveAddOptions, AddStatsPolicy, Snapshot, StructTypeExt, new_metadata,
     resolve_snapshot,
 };
 use crate::logstore::with_operation;
@@ -166,7 +166,7 @@ pub struct MergeBuilder {
     ///Prefix target columns with a user provided prefix
     target_alias: Option<String>,
     /// A snapshot of the table's state. AKA the target table in the operation
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// The source data
     source: DataFrame,
     /// Whether the source is a streaming source (if true, stats deducing to prune target is disabled)
@@ -193,7 +193,7 @@ impl MergeBuilder {
     /// Create a new [`MergeBuilder`]
     pub fn new<E: Into<Expression>>(
         log_store: LogStoreRef,
-        snapshot: Option<EagerSnapshot>,
+        snapshot: Option<Arc<Snapshot>>,
         predicate: E,
         source: DataFrame,
     ) -> Self {
@@ -889,7 +889,7 @@ async fn execute(
     predicate: Expression,
     mut source: DataFrame,
     log_store: LogStoreRef,
-    snapshot: EagerSnapshot,
+    snapshot: Arc<Snapshot>,
     state: SessionState,
     writer_properties: DeltaWriterProperties,
     mut commit_properties: CommitProperties,
@@ -902,7 +902,7 @@ async fn execute(
     match_operations: Vec<MergeOperationConfig>,
     not_match_target_operations: Vec<MergeOperationConfig>,
     not_match_source_operations: Vec<MergeOperationConfig>,
-) -> DeltaResult<(EagerSnapshot, MergeMetrics)> {
+) -> DeltaResult<(Arc<Snapshot>, MergeMetrics)> {
     info!(
         operation = "merge",
         version = snapshot.version(),
@@ -983,7 +983,7 @@ async fn execute(
 
     let target_provider = provider_as_source(
         DeltaScanNext::builder()
-            .with_eager_snapshot(snapshot.clone())
+            .with_snapshot(snapshot.clone())
             .with_log_store(log_store.clone())
             .with_session(state.clone().into())
             .with_file_column(file_column.as_str())
@@ -1096,7 +1096,7 @@ async fn execute(
 
     let target_provider = {
         let mut builder = DeltaScanNext::builder()
-            .with_eager_snapshot(snapshot.clone())
+            .with_snapshot(snapshot.clone())
             .with_log_store(log_store.clone())
             .with_session(state.clone().into())
             .with_file_column(file_column.as_str());
@@ -1737,7 +1737,7 @@ async fn execute(
     let table_root = snapshot.table_configuration().table_root().clone();
 
     {
-        let mut active_adds = snapshot.snapshot().active_adds(
+        let mut active_adds = snapshot.active_adds(
             log_store.as_ref(),
             ActiveAddOptions {
                 predicate: None,
@@ -1940,12 +1940,8 @@ fn derive_skipped_file_count(total_files: usize, scanned_files: usize) -> (usize
     (total_files.saturating_sub(scanned_files), impossible_state)
 }
 
-async fn count_active_adds(
-    snapshot: &EagerSnapshot,
-    log_store: &dyn LogStore,
-) -> DeltaResult<usize> {
+async fn count_active_adds(snapshot: &Snapshot, log_store: &dyn LogStore) -> DeltaResult<usize> {
     let batches = snapshot
-        .snapshot()
         .active_add_batches(
             log_store,
             ActiveAddOptions {
@@ -2327,7 +2323,10 @@ mod tests {
         let schema = get_arrow_schema(&None);
         let table = setup_table(Some(vec!["modified"])).await;
         let table = write_data(table, &schema).await;
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let (table, metrics) = upsert(
             table,
@@ -2407,7 +2406,10 @@ mod tests {
             .with_save_mode(SaveMode::Append)
             .await
             .unwrap();
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let source = one_shot_source(
             Arc::clone(&schema),
@@ -2689,7 +2691,10 @@ mod tests {
         let table = setup_table(Some(vec!["modified"])).await;
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -2739,7 +2744,10 @@ mod tests {
         let table = setup_table_with_non_null_column(Some(vec!["modified"])).await;
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let null_schema = get_arrow_schema(&None);
@@ -2797,7 +2805,7 @@ mod tests {
         let schema = get_arrow_schema(&None);
         let table = setup_table(Some(vec!["modified"])).await;
         let table = write_data(table, &schema).await;
-        let pre_merge_files = table.snapshot().unwrap().log_data().num_files();
+        let pre_merge_files = table.eager_snapshot().await.unwrap().log_data().num_files();
         assert_eq!(pre_merge_files, 2);
 
         let ctx = SessionContext::new();
@@ -3112,7 +3120,7 @@ mod tests {
 
         let target_provider = provider_as_source(
             DeltaScanNext::builder()
-                .with_eager_snapshot(table.snapshot().unwrap().snapshot().clone())
+                .with_snapshot(table.snapshot().unwrap().snapshot().clone())
                 .with_log_store(table.log_store.clone())
                 .with_session(state.clone().into())
                 .with_file_column(PATH_COLUMN)
@@ -3157,7 +3165,7 @@ mod tests {
 
         let target_provider = provider_as_source(
             DeltaScanNext::builder()
-                .with_eager_snapshot(table.snapshot().unwrap().snapshot().clone())
+                .with_snapshot(table.snapshot().unwrap().snapshot().clone())
                 .with_log_store(table.log_store.clone())
                 .with_session(state.clone().into())
                 .with_file_column(PATH_COLUMN)
@@ -3182,7 +3190,8 @@ mod tests {
     async fn test_merge_rewrite_removes_old_file_and_avoids_duplicate_rows() {
         let (table, source) = setup().await;
         let original_paths: Vec<String> = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .into_iter()
@@ -3429,10 +3438,14 @@ mod tests {
 
         assert_eq!(first_metrics.num_target_rows_inserted, 3);
         assert_eq!(first_metrics.num_target_files_removed, 0);
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let original_file = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .into_iter()
@@ -3467,7 +3480,10 @@ mod tests {
 
         assert_eq!(second_metrics.num_target_rows_updated, 3);
         assert_eq!(second_metrics.num_target_files_removed, 1);
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let snapshot_bytes = table
             .log_store
@@ -3630,7 +3646,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         (table, merge_source(schema))
     }
@@ -3653,7 +3672,7 @@ mod tests {
 
     async fn assert_merge(table: DeltaTable, metrics: MergeMetrics) {
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 1);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 1);
         assert!(metrics.num_target_files_added >= 1);
         assert_eq!(metrics.num_target_files_removed, 1);
         assert_eq!(metrics.num_target_rows_copied, 1);
@@ -3805,7 +3824,7 @@ mod tests {
         assert_eq!(metrics.num_target_rows_updated, 1);
         assert_eq!(metrics.num_target_rows_inserted, 0);
         assert_eq!(metrics.num_target_rows_deleted, 0);
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 1);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 1);
     }
 
     #[tokio::test]
@@ -3822,7 +3841,15 @@ mod tests {
             .await
             .unwrap();
         let target_table = write_data(target_table, &get_arrow_schema(&None)).await;
-        assert_eq!(target_table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            target_table
+                .eager_snapshot()
+                .await
+                .unwrap()
+                .log_data()
+                .num_files(),
+            1
+        );
         let target_file_column = resolve_file_column_name(
             target_table
                 .snapshot()
@@ -3875,7 +3902,15 @@ mod tests {
             .with_save_mode(SaveMode::Append)
             .await
             .unwrap();
-        assert_eq!(source_table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            source_table
+                .eager_snapshot()
+                .await
+                .unwrap()
+                .log_data()
+                .num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         source_table
@@ -5499,7 +5534,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -5555,7 +5593,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 3);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 3);
         assert!(metrics.num_target_files_added >= 3);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 1);
@@ -5654,7 +5692,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 4);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            4
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -5693,7 +5734,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 3);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 3);
         assert_eq!(metrics.num_target_files_added, 3);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 0);
@@ -5741,7 +5782,10 @@ mod tests {
         // #4535: a predicated `when_not_matched_by_source` clause must still allow partition pruning.
         let schema = get_arrow_schema(&None);
         let table = write_data(setup_table(Some(vec!["id"])).await, &schema).await;
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 4);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            4
+        );
 
         let ctx = SessionContext::new();
         let source = ctx.read_batch(single_row_source(&schema)).unwrap();
@@ -5775,7 +5819,10 @@ mod tests {
         // #4535 guard: an unconditional clause can touch any row, so the full scan must remain.
         let schema = get_arrow_schema(&None);
         let table = write_data(setup_table(Some(vec!["id"])).await, &schema).await;
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 4);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            4
+        );
 
         let ctx = SessionContext::new();
         let source = ctx.read_batch(single_row_source(&schema)).unwrap();
@@ -5808,7 +5855,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -5872,7 +5922,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 3);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 3);
         assert!(metrics.num_target_files_added >= 3);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 1);
@@ -5911,7 +5961,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -5939,7 +5992,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 2);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 2);
         assert_eq!(metrics.num_target_files_added, 2);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 2);
@@ -5980,7 +6033,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6008,7 +6064,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 2);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 2);
         assert_eq!(metrics.num_target_files_added, 1);
         assert_eq!(metrics.num_target_files_removed, 1);
         assert_eq!(metrics.num_target_rows_copied, 1);
@@ -6048,7 +6104,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6076,7 +6135,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
         assert_eq!(metrics.num_target_files_added, 2);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 2);
@@ -6111,7 +6173,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6180,7 +6245,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6209,7 +6277,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(2));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
         assert_eq!(metrics.num_target_files_added, 2);
         assert_eq!(metrics.num_target_files_removed, 2);
         assert_eq!(metrics.num_target_rows_copied, 2);
@@ -6244,7 +6315,10 @@ mod tests {
 
         let table = write_data(table, &schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6310,7 +6384,10 @@ mod tests {
         let table = setup_table(Some(vec!["modified"])).await;
 
         assert_eq!(table.version(), Some(0));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 0);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            0
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6354,7 +6431,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(1));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 2);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 2);
         assert!(metrics.num_target_files_added >= 2);
         assert_eq!(metrics.num_target_files_removed, 0);
         assert_eq!(metrics.num_target_rows_copied, 0);
@@ -6396,7 +6473,10 @@ mod tests {
         let table = setup_table(Some(vec!["modified"])).await;
 
         assert_eq!(table.version(), Some(0));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 0);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            0
+        );
 
         let ctx = SessionContext::new();
         let batch = RecordBatch::try_new(
@@ -6437,7 +6517,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(table.version(), Some(1));
-        assert!(table.snapshot().unwrap().log_data().num_files() >= 2);
+        assert!(table.eager_snapshot().await.unwrap().log_data().num_files() >= 2);
         assert!(metrics.num_target_files_added >= 2);
         assert_eq!(metrics.num_target_files_removed, 0);
         assert_eq!(metrics.num_target_rows_copied, 0);
@@ -6523,7 +6603,10 @@ mod tests {
 
         let table = write_data(table, &arrow_schema).await;
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let (table, _metrics) = table
             .merge(source, "target.Id = source.Id")
@@ -6819,7 +6902,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let batch = RecordBatch::try_new(
             Arc::clone(&arrow_schema.clone()),
@@ -6934,7 +7020,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let batch = RecordBatch::try_new(
             Arc::clone(&arrow_schema.clone()),
@@ -7044,7 +7133,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let batch = RecordBatch::try_new(
             Arc::clone(&arrow_schema.clone()),
@@ -7158,7 +7250,10 @@ mod tests {
         let table = write_data(table, &schema).await;
 
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
         let source = merge_source(schema);
 
         let (table, metrics) = table
@@ -7239,7 +7334,10 @@ mod tests {
         let table = write_data(table, &schema).await;
 
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
         let source = merge_source(schema);
         let source = source.with_column("inserted_by", lit("new_value")).unwrap();
 
@@ -7333,7 +7431,10 @@ mod tests {
         let table = write_data(table, &schema).await;
 
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
         let source = merge_source(schema);
 
         let (table, _metrics) = table

@@ -186,7 +186,7 @@ async fn read_encoded_table(integration: &IntegrationContext, root_path: &str) -
         .await?;
     let snapshot = table.snapshot()?;
     assert_eq!(snapshot.version(), 0);
-    assert_eq!(snapshot.log_data().num_files(), 2);
+    assert_eq!(table.eager_snapshot().await?.log_data().num_files(), 2);
 
     Ok(())
 }

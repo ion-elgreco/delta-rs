@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -29,7 +30,7 @@ use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
 use crate::kernel::{Action, Add, Remove};
-use crate::kernel::{ActiveAddOptions, AddStatsPolicy, EagerSnapshot, Snapshot, resolve_snapshot};
+use crate::kernel::{ActiveAddOptions, AddStatsPolicy, Snapshot, resolve_snapshot};
 use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::DeltaOperation;
@@ -39,7 +40,7 @@ use crate::table::state::DeltaTableState;
 /// See this module's documentation for more information
 pub struct FileSystemCheckBuilder {
     /// A snapshot of the to-be-checked table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Don't remove actions to the table log. Just determine which files can be removed
@@ -97,7 +98,7 @@ fn is_absolute_path(path: &str) -> DeltaResult<bool> {
 
 impl FileSystemCheckBuilder {
     /// Create a new [`FileSystemCheckBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         FileSystemCheckBuilder {
             snapshot,
             log_store,
@@ -174,7 +175,7 @@ impl FileSystemCheckPlan {
     pub async fn execute(
         self,
         log_store: LogStoreRef,
-        snapshot: &EagerSnapshot,
+        snapshot: &Snapshot,
         mut commit_properties: CommitProperties,
     ) -> DeltaResult<FileSystemCheckMetrics> {
         let mut actions = Vec::with_capacity(self.files_to_remove.len());
@@ -233,7 +234,7 @@ impl std::future::IntoFuture for FileSystemCheckBuilder {
         Box::pin(async move {
             let snapshot = resolve_snapshot(&this.log_store, this.snapshot.clone(), None).await?;
 
-            let plan = this.create_fsck_plan(snapshot.snapshot()).await?;
+            let plan = this.create_fsck_plan(&snapshot).await?;
             if this.dry_run {
                 return Ok((
                     DeltaTable::new_with_state(this.log_store, DeltaTableState::new(snapshot)),
@@ -350,7 +351,6 @@ mod tests {
         assert_eq!(metrics.files_removed, vec![source_add.path]);
         let active_files: Vec<_> = table
             .snapshot()?
-            .snapshot()
             .snapshot()
             .active_adds(
                 log_store.as_ref(),

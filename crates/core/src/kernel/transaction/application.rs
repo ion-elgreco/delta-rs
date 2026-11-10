@@ -34,7 +34,10 @@ mod tests {
             .unwrap();
         let state = table.snapshot().unwrap();
         assert_eq!(state.version(), 0);
-        assert_eq!(state.log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
 
         let app_txn = table
             .snapshot()

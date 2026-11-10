@@ -140,7 +140,7 @@ impl DeltaScanConfigBuilder {
     }
 
     /// Build a DeltaScanConfig and ensure no column name conflicts occur during downstream processing
-    pub fn build(&self, snapshot: &EagerSnapshot) -> DeltaResult<DeltaScanConfig> {
+    pub fn build(&self, snapshot: &Snapshot) -> DeltaResult<DeltaScanConfig> {
         let file_column_name = if self.include_file_column {
             Some(resolve_file_column_name(
                 snapshot.input_schema().as_ref(),
@@ -484,7 +484,7 @@ impl DeltaTable {
     pub fn table_provider(&self) -> TableProviderBuilder {
         let mut builder = TableProviderBuilder::new().with_log_store(self.log_store());
         if let Ok(state) = self.snapshot() {
-            builder = builder.with_snapshot(state.snapshot().snapshot().clone());
+            builder = builder.with_snapshot(state.snapshot().clone());
         }
         builder
     }
@@ -943,7 +943,7 @@ mod tests {
     #[tokio::test]
     async fn test_builder_allows_matching_snapshot_and_log_store_root() {
         let table = create_in_memory_id_table().await.unwrap();
-        let snapshot = table.snapshot().unwrap().snapshot().snapshot().clone();
+        let snapshot = table.snapshot().unwrap().snapshot().clone();
         let log_store = table.log_store();
 
         let provider = next::DeltaScan::builder()
@@ -976,7 +976,7 @@ mod tests {
             .with_columns(schema.fields().cloned())
             .await
             .unwrap();
-        let snapshot = table_one.snapshot().unwrap().snapshot().snapshot().clone();
+        let snapshot = table_one.snapshot().unwrap().snapshot().clone();
 
         let two_url = Url::parse("memory:///same-root?log-token").unwrap();
         let two_store =
@@ -1013,7 +1013,7 @@ mod tests {
             .with_columns(schema.fields().cloned())
             .await
             .unwrap();
-        let snapshot = table_one.snapshot().unwrap().snapshot().snapshot().clone();
+        let snapshot = table_one.snapshot().unwrap().snapshot().clone();
 
         let two_url = Url::parse("memory:///different-root?log-token").unwrap();
         let two_store =

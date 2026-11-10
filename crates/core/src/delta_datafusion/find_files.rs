@@ -468,12 +468,32 @@ pub(in crate::delta_datafusion) async fn find_files_scan(
 ///
 /// DataFusion evaluates partition predicates with the `path` and `partition.*`
 /// columns. Callers must provide a snapshot with materialized `Add` batches.
-/// Use [`scan_memory_table`] with lazy snapshots.
+/// Use [`add_actions_partition_mem_table`] with other snapshots.
 /// Returns `None` when the snapshot has no `Add` actions.
 pub(crate) fn try_materialized_add_actions_partition_mem_table(
     snapshot: &Snapshot,
 ) -> DeltaResult<Option<MemTable>> {
     add_actions_partition_mem_table_from_batches(snapshot.add_actions_partition_batches()?)
+}
+
+/// Builds a partition metadata [`MemTable`] from the active `Add` actions of the snapshot.
+///
+/// The actions are read from the log when the snapshot does not hold them in memory.
+/// Returns `None` when the snapshot has no `Add` actions.
+pub(crate) async fn add_actions_partition_mem_table(
+    snapshot: &Snapshot,
+    log_store: &dyn LogStore,
+) -> DeltaResult<Option<MemTable>> {
+    // Partition pruning needs `partitionValues_parsed`, which only the parsed stats policy
+    // materializes, so the batches must be read with that policy.
+    let options = ActiveAddOptions {
+        predicate: None,
+        stats: AddStatsPolicy::Parsed,
+    };
+    let add_action_batches = snapshot.active_add_batches(log_store, options).await?;
+    add_actions_partition_mem_table_from_batches(
+        snapshot.active_add_partition_batches_from(&add_action_batches)?,
+    )
 }
 
 fn add_actions_partition_mem_table_from_batches(

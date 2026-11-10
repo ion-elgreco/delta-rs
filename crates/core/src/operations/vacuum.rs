@@ -40,8 +40,8 @@ use crate::DeltaTable;
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
 use crate::kernel::{
-    ActiveAddOptions, AddStatsPolicy, EagerSnapshot, LogicalFileView, Snapshot, TombstoneView,
-    Version, resolve_snapshot,
+    ActiveAddOptions, AddStatsPolicy, LogicalFileView, Snapshot, TombstoneView, Version,
+    resolve_snapshot,
 };
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef};
@@ -198,7 +198,7 @@ pub enum VacuumMode {
 /// See this module's documentation for more information
 pub struct VacuumBuilder {
     /// A snapshot of the to-be-vacuumed table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Period of stale files allowed.
@@ -257,7 +257,7 @@ pub struct VacuumEndOperationMetrics {
 /// Methods to specify various vacuum options and to execute the operation
 impl VacuumBuilder {
     /// Create a new [`VacuumBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         VacuumBuilder {
             snapshot,
             log_store,
@@ -558,7 +558,7 @@ impl std::future::IntoFuture for VacuumBuilder {
         let this = self;
         Box::pin(async move {
             let snapshot = resolve_snapshot(&this.log_store, this.snapshot.clone(), None).await?;
-            let plan = this.create_vacuum_plan(snapshot.snapshot()).await?;
+            let plan = this.create_vacuum_plan(&snapshot).await?;
 
             if this.dry_run {
                 return Ok((
@@ -611,7 +611,7 @@ impl VacuumPlan {
     pub async fn execute(
         self,
         store: LogStoreRef,
-        snapshot: &EagerSnapshot,
+        snapshot: &Snapshot,
         mut commit_properties: CommitProperties,
     ) -> Result<(DeltaTableState, VacuumMetrics), DeltaTableError> {
         let start_operation = DeltaOperation::VacuumStart {
@@ -1012,6 +1012,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::kernel::EagerSnapshot;
     use crate::kernel::transaction::CommitBuilder;
     use crate::kernel::{Action, DataType, PrimitiveType, Remove, Snapshot, StructField};
     use crate::logstore::LogStoreConfig;
@@ -1306,7 +1307,7 @@ mod tests {
             .with_clock(Arc::new(MockClock::new(2_000_000_000_000)));
 
         assert!(!lazy.has_materialized_files_for_test());
-        let eager_plan = builder.create_vacuum_plan(eager.snapshot()).await?;
+        let eager_plan = builder.create_vacuum_plan(eager).await?;
         let lazy_plan = builder.create_vacuum_plan(&lazy).await?;
 
         assert_eq!(
@@ -1796,7 +1797,8 @@ mod tests {
         writer.flush_and_commit(&mut table).await?;
 
         let tombstoned_paths: Vec<_> = table
-            .snapshot()?
+            .eager_snapshot()
+            .await?
             .log_data()
             .into_iter()
             .map(|add| add.object_store_path().to_string())
@@ -2554,7 +2556,8 @@ mod tests {
         writer.flush_and_commit(&mut table).await?;
 
         let valid_paths: Vec<String> = table
-            .snapshot()?
+            .eager_snapshot()
+            .await?
             .log_data()
             .into_iter()
             .map(|add| add.object_store_path().to_string())

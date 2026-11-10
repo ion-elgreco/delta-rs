@@ -23,6 +23,7 @@
 use std::cmp::max;
 use std::collections::HashSet;
 use std::ops::BitXor;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
@@ -34,8 +35,8 @@ use serde::Serialize;
 
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
 use crate::kernel::{
-    Action, ActiveAddOptions, Add, AddStatsPolicy, EagerSnapshot, LogicalFileView,
-    ProtocolExt as _, ProtocolInner, Remove, Snapshot, Version, resolve_snapshot,
+    Action, ActiveAddOptions, Add, AddStatsPolicy, LogicalFileView, ProtocolExt as _,
+    ProtocolInner, Remove, Snapshot, Version, resolve_snapshot,
 };
 use crate::logstore::with_operation;
 use crate::logstore::{LogStore, LogStoreRef};
@@ -78,7 +79,7 @@ pub struct RestoreMetrics {
 /// See this module's documentation for more information
 pub struct RestoreBuilder {
     /// A snapshot of the to-be-restored table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Version to restore
@@ -95,7 +96,7 @@ pub struct RestoreBuilder {
 
 impl RestoreBuilder {
     /// Create a new [`RestoreBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,
@@ -213,7 +214,7 @@ fn restore_file_key(file: &LogicalFileView) -> (Path, Option<String>) {
 #[allow(clippy::too_many_arguments)]
 async fn execute(
     log_store: LogStoreRef,
-    snapshot: EagerSnapshot,
+    snapshot: Arc<Snapshot>,
     version_to_restore: Option<Version>,
     datetime_to_restore: Option<DateTime<Utc>>,
     ignore_missing_files: bool,
@@ -237,9 +238,9 @@ async fn execute(
         }
     }
 
-    let current_snapshot: &Snapshot = snapshot.snapshot();
+    let current_snapshot: &Snapshot = &snapshot;
     let snapshot_restored = table.snapshot()?;
-    let target_snapshot: &Snapshot = snapshot_restored.snapshot().snapshot();
+    let target_snapshot: &Snapshot = snapshot_restored.snapshot();
     let version = target_snapshot.version();
 
     if version >= current_snapshot.version() {
@@ -383,6 +384,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+    use crate::kernel::EagerSnapshot;
     use crate::kernel::{
         DataType, DeletionVectorDescriptor, PrimitiveType, Snapshot, StorageType, StructField,
     };

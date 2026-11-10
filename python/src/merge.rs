@@ -5,7 +5,7 @@ use deltalake::datafusion::datasource::MemTable;
 use deltalake::datafusion::physical_plan::memory::LazyBatchGenerator;
 use deltalake::delta_datafusion::create_session;
 use deltalake::delta_datafusion::create_session_state_with_spill_config;
-use deltalake::kernel::EagerSnapshot;
+use deltalake::kernel::Snapshot;
 use deltalake::logstore::LogStoreRef;
 use deltalake::operations::merge::MergeBuilder;
 use deltalake::{DeltaResult, DeltaTable, DeltaTableError};
@@ -41,7 +41,7 @@ impl PyMergeBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         log_store: LogStoreRef,
-        snapshot: EagerSnapshot,
+        snapshot: Arc<Snapshot>,
         source: PyRecordBatchReader,
         batch_schema: PyArrowSchema,
         predicate: String,

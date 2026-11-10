@@ -694,7 +694,8 @@ mod tests {
         );
 
         let mut partition_values = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .iter()
@@ -1328,7 +1329,9 @@ mod tests {
         );
 
         // Verify can get file metadata
-        let state = table.snapshot().unwrap();
-        assert_eq!(state.log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
     }
 }

@@ -63,7 +63,7 @@ use crate::delta_datafusion::{
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::schema::cast::normalize_for_delta;
 use crate::kernel::transaction::{CommitBuilder, CommitProperties, PROTOCOL, TableReference};
-use crate::kernel::{Action, DataType, EagerSnapshot, StructType};
+use crate::kernel::{Action, DataType, Snapshot, StructType};
 use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::{DeltaOperation, SaveMode};
@@ -140,7 +140,7 @@ impl FromStr for SchemaMode {
 /// Write data into a DeltaTable
 pub struct WriteBuilder {
     /// A snapshot of the to-be-loaded table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// The input plan
@@ -193,7 +193,7 @@ pub struct WriteMetrics {
 
 impl WriteBuilder {
     /// Create a new [`WriteBuilder`]
-    pub fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,
@@ -560,7 +560,7 @@ impl std::future::IntoFuture for WriteBuilder {
                     session.ensure_log_store_registered(this.log_store.as_ref())?;
 
                     let prepared_write = plan::prepare_write(plan::WritePreparationInput {
-                        snapshot: this.snapshot.as_ref(),
+                        snapshot: this.snapshot.as_deref(),
                         session: &session,
                         source,
                         mode: this.mode,
@@ -574,7 +574,7 @@ impl std::future::IntoFuture for WriteBuilder {
                     })?;
 
                     let overwrite_plan = plan::plan_overwrite_rewrite(
-                        this.snapshot.as_ref(),
+                        this.snapshot.as_deref(),
                         &log_store,
                         &session,
                         this.mode,
@@ -907,13 +907,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(1));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
 
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_eq!(write_metrics.num_added_rows, batch.num_rows());
         assert_eq!(
             write_metrics.num_added_files,
-            table.snapshot().unwrap().log_data().num_files()
+            table.eager_snapshot().await.unwrap().log_data().num_files()
         );
         assert_common_write_metrics(write_metrics);
 
@@ -940,7 +943,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(2));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_eq!(write_metrics.num_added_rows, batch.num_rows());
         assert_eq!(write_metrics.num_added_files, 1);
@@ -969,7 +975,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(3));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_eq!(write_metrics.num_added_rows, batch.num_rows());
         assert!(write_metrics.num_removed_files > 0);
@@ -1142,7 +1151,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(0));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            1
+        );
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_common_write_metrics(write_metrics);
     }
@@ -1157,7 +1169,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(0));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 2);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            2
+        );
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_eq!(write_metrics.num_added_files, 2);
         assert_common_write_metrics(write_metrics);
@@ -1169,7 +1184,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(table.version(), Some(0));
-        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 4);
+        assert_eq!(
+            table.eager_snapshot().await.unwrap().log_data().num_files(),
+            4
+        );
 
         let write_metrics: WriteMetrics = get_write_metrics(&table).await;
         assert_eq!(write_metrics.num_added_files, 4);
@@ -1216,9 +1234,15 @@ mod tests {
         let single_writer_data = get_data_sorted(&single_writer_table, "modified, id, value").await;
         assert_eq!(parallel_data, single_writer_data);
 
-        let parallel_files = parallel_table.snapshot().unwrap().log_data().num_files();
+        let parallel_files = parallel_table
+            .eager_snapshot()
+            .await
+            .unwrap()
+            .log_data()
+            .num_files();
         let single_writer_files = single_writer_table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .num_files();
@@ -1622,7 +1646,7 @@ mod tests {
             table.snapshot().unwrap().metadata().partition_columns(),
             &vec!["modified".to_string()]
         );
-        let initial_num_files = table.snapshot().unwrap().log_data().num_files();
+        let initial_num_files = table.eager_snapshot().await.unwrap().log_data().num_files();
 
         let table = table
             .write(vec![batch])
@@ -1638,7 +1662,8 @@ mod tests {
         );
 
         let add_paths = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .iter()
@@ -1716,7 +1741,8 @@ mod tests {
         );
 
         let add_paths = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .iter()
@@ -1781,7 +1807,8 @@ mod tests {
         );
 
         let add_paths = table
-            .snapshot()
+            .eager_snapshot()
+            .await
             .unwrap()
             .log_data()
             .iter()

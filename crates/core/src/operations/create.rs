@@ -739,7 +739,10 @@ mod tests {
                 .unwrap();
             let state = table.snapshot().unwrap();
             assert_eq!(state.version(), 0);
-            assert_eq!(state.log_data().num_files(), 1);
+            assert_eq!(
+                table.eager_snapshot().await.unwrap().log_data().num_files(),
+                1
+            );
 
             let mut table = table
                 .create()
@@ -751,7 +754,10 @@ mod tests {
             let state = table.snapshot().unwrap();
             assert_eq!(state.version(), 1);
             // Checks if files got removed after overwrite
-            assert_eq!(state.log_data().num_files(), 0);
+            assert_eq!(
+                table.eager_snapshot().await.unwrap().log_data().num_files(),
+                0
+            );
         }
 
         #[tokio::test]
@@ -765,7 +771,10 @@ mod tests {
                 .unwrap();
             let state = table.snapshot().unwrap();
             assert_eq!(state.version(), 0);
-            assert_eq!(state.log_data().num_files(), 1);
+            assert_eq!(
+                table.eager_snapshot().await.unwrap().log_data().num_files(),
+                1
+            );
 
             let mut table = table
                 .create()
@@ -778,7 +787,10 @@ mod tests {
             let state = table.snapshot().unwrap();
             assert_eq!(state.version(), 1);
             // Checks if files got removed after overwrite
-            assert_eq!(state.log_data().num_files(), 0);
+            assert_eq!(
+                table.eager_snapshot().await.unwrap().log_data().num_files(),
+                0
+            );
         }
 
         #[tokio::test]

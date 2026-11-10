@@ -4,12 +4,13 @@ use delta_kernel::schema::StructType;
 use delta_kernel::table_features::ColumnMappingMode;
 use futures::future::BoxFuture;
 use itertools::Itertools;
+use std::sync::Arc;
 
 use crate::errors::ColumnMappingOperation;
 use crate::kernel::schema::merge_delta_struct;
 use crate::kernel::transaction::CommitProperties;
 use crate::kernel::{
-    Action, EagerSnapshot, MetadataExt, ProtocolExt as _, SnapshotMetadataRef, StructField,
+    Action, MetadataExt, ProtocolExt as _, Snapshot, SnapshotMetadataRef, StructField,
     StructTypeExt, resolve_snapshot,
 };
 use crate::logstore::LogStoreRef;
@@ -20,7 +21,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 /// Add new columns and/or nested fields to a table
 pub struct AddColumnBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Fields to add/merge into schema
     fields: Option<Vec<StructField>>,
     /// Delta object store for handling data files
@@ -31,7 +32,7 @@ pub struct AddColumnBuilder {
 
 impl AddColumnBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,
@@ -104,7 +105,6 @@ impl std::future::IntoFuture for AddColumnBuilder {
         Box::pin(async move {
             let snapshot = resolve_snapshot(&this.log_store, this.snapshot.clone(), None).await?;
             if snapshot
-                .snapshot()
                 .metadata_state()
                 .table_configuration
                 .column_mapping_mode()
@@ -120,8 +120,7 @@ impl std::future::IntoFuture for AddColumnBuilder {
                 Some(v) => v,
                 None => return Err(DeltaTableError::Generic("No fields provided".to_string())),
             };
-            let (actions, operation) =
-                plan_add_column_actions(snapshot.snapshot().metadata_state(), fields)?;
+            let (actions, operation) = plan_add_column_actions(snapshot.metadata_state(), fields)?;
 
             commit_actions_in_scope(
                 &this.log_store,

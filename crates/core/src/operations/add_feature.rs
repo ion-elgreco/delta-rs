@@ -3,10 +3,11 @@
 use delta_kernel::table_features::TableFeature;
 use futures::future::BoxFuture;
 use itertools::Itertools;
+use std::sync::Arc;
 
 use crate::DeltaTable;
 use crate::kernel::transaction::CommitProperties;
-use crate::kernel::{Action, EagerSnapshot, SnapshotMetadataRef, TableFeatures, resolve_snapshot};
+use crate::kernel::{Action, Snapshot, SnapshotMetadataRef, TableFeatures, resolve_snapshot};
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
 use crate::protocol::DeltaOperation;
@@ -15,7 +16,7 @@ use crate::{DeltaResult, DeltaTableError};
 /// Enable table features for a table
 pub struct AddTableFeatureBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Name of the feature
     name: Vec<TableFeatures>,
     /// Allow protocol versions to be increased by setting features
@@ -28,7 +29,7 @@ pub struct AddTableFeatureBuilder {
 
 impl AddTableFeatureBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             name: vec![],
             allow_protocol_versions_increase: false,
@@ -156,7 +157,7 @@ impl std::future::IntoFuture for AddTableFeatureBuilder {
                 return Err(DeltaTableError::Generic("No features provided".to_string()));
             }
             let (actions, operation) = plan_add_table_feature_actions(
-                snapshot.snapshot().metadata_state(),
+                snapshot.metadata_state(),
                 &this.name,
                 this.allow_protocol_versions_increase,
             )?;

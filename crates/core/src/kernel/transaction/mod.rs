@@ -94,8 +94,8 @@ use serde::{Deserialize, Serialize};
 use self::conflict_checker::{TransactionInfo, WinningCommitSummary};
 use crate::errors::DeltaTableError;
 use crate::kernel::{
-    Action, Add, CommitInfo, EagerSnapshot, IsolationLevel, Metadata, Protocol, Transaction,
-    Version,
+    Action, Add, CommitInfo, EagerSnapshot, IsolationLevel, Metadata, Protocol, Snapshot,
+    Transaction, Version,
 };
 use crate::logstore::ObjectStoreRef;
 use crate::logstore::with_operation;
@@ -260,8 +260,44 @@ pub trait TableReference: Send + Sync {
     /// Get the table metadata of the snapshot
     fn metadata(&self) -> &Metadata;
 
-    /// Try to cast this table reference to a `EagerSnapshot`
-    fn eager_snapshot(&self) -> &EagerSnapshot;
+    /// The snapshot of the table version that the commit is based on
+    fn snapshot(&self) -> &Snapshot;
+}
+
+impl TableReference for Snapshot {
+    fn protocol(&self) -> &Protocol {
+        Snapshot::protocol(self)
+    }
+
+    fn metadata(&self) -> &Metadata {
+        Snapshot::metadata(self)
+    }
+
+    fn config(&self) -> &TableProperties {
+        self.table_properties()
+    }
+
+    fn snapshot(&self) -> &Snapshot {
+        self
+    }
+}
+
+impl<T: TableReference + ?Sized> TableReference for Arc<T> {
+    fn protocol(&self) -> &Protocol {
+        self.as_ref().protocol()
+    }
+
+    fn metadata(&self) -> &Metadata {
+        self.as_ref().metadata()
+    }
+
+    fn config(&self) -> &TableProperties {
+        self.as_ref().config()
+    }
+
+    fn snapshot(&self) -> &Snapshot {
+        self.as_ref().snapshot()
+    }
 }
 
 impl TableReference for EagerSnapshot {
@@ -277,8 +313,8 @@ impl TableReference for EagerSnapshot {
         self.table_properties()
     }
 
-    fn eager_snapshot(&self) -> &EagerSnapshot {
-        self
+    fn snapshot(&self) -> &Snapshot {
+        EagerSnapshot::snapshot(self)
     }
 }
 
@@ -295,7 +331,7 @@ impl TableReference for DeltaTableState {
         self.snapshot.metadata()
     }
 
-    fn eager_snapshot(&self) -> &EagerSnapshot {
+    fn snapshot(&self) -> &Snapshot {
         &self.snapshot
     }
 }
@@ -819,8 +855,8 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                 let mut attempt_number: usize = 1;
 
                 // Handle the case where table doesn't exist yet (initial table creation)
-                let read_snapshot: EagerSnapshot = if let Some(table_data) = this.table_data {
-                    table_data.eager_snapshot().clone()
+                let read_snapshot: Arc<Snapshot> = if let Some(table_data) = this.table_data {
+                    Arc::new(table_data.snapshot().clone())
                 } else {
                     debug!("committing initial table version 0");
                     match committer.commit(0, commit_or_bytes.clone()).await {
@@ -842,7 +878,9 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                             debug!("version 0 already exists, loading table state for retry");
                             attempt_number = 2;
                             let latest_version: Version = log_store.get_latest_version(0).await?;
-                            EagerSnapshot::try_new(log_store.as_ref(), Some(latest_version)).await?
+                            Arc::new(
+                                Snapshot::try_new(log_store.as_ref(), Some(latest_version)).await?,
+                            )
                         }
                         Err(e) => return Err(e.into()),
                     }
@@ -889,6 +927,8 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                             );
                             let mut steps = latest_version - read_snapshot.version();
                             let mut conflicts_checked = 0;
+                            // Active adds replayed for this attempt, shared by all winning commits.
+                            let mut replayed_adds = None;
 
                             // Need to check for conflicts with each version between the read_snapshot and
                             // the latest!
@@ -900,12 +940,25 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                                     (latest_version - steps) + 1,
                                 )
                                 .await?;
-                                let conflict_read_set = read_snapshot
-                                    .snapshot()
-                                    .conflict_read_set(log_store.as_ref())
-                                    .await?;
+                                let active_files = if ConflictChecker::needs_active_files(
+                                    &summary,
+                                    data.operation.read_whole_table(),
+                                    read_files.is_some(),
+                                ) {
+                                    Some(
+                                        read_snapshot
+                                            .conflict_read_set(
+                                                log_store.as_ref(),
+                                                &mut replayed_adds,
+                                            )
+                                            .await?,
+                                    )
+                                } else {
+                                    None
+                                };
                                 let transaction_info = TransactionInfo::try_new(
-                                    conflict_read_set,
+                                    &read_snapshot,
+                                    active_files,
                                     data.operation.read_predicate(),
                                     &data.actions,
                                     data.operation.read_whole_table(),
@@ -936,8 +989,8 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                                 "all conflicts resolved, updating snapshot"
                             );
                             // Update snapshot to latest version after successful conflict check
-                            read_snapshot
-                                .update(&log_store, Some(latest_version))
+                            read_snapshot = read_snapshot
+                                .update_from_log_store(log_store.as_ref(), Some(latest_version))
                                 .await?;
                         }
                         let version: Version = latest_version + 1;
@@ -981,7 +1034,7 @@ impl<'a> IntoFuture for PreparedCommit<'a> {
                                         .map(|v| v.cleanup_expired_logs)
                                         .unwrap_or_default(),
                                     log_store,
-                                    table_data: Some(Box::new(read_snapshot)),
+                                    table_data: Some(read_snapshot),
                                     metrics: CommitMetrics {
                                         num_retries: (attempt_number - 1) as u64,
                                     },
@@ -1044,7 +1097,7 @@ pub struct PostCommit {
     create_checkpoint: bool,
     cleanup_expired_logs: Option<bool>,
     log_store: LogStoreRef,
-    table_data: Option<Box<dyn TableReference>>,
+    table_data: Option<Arc<Snapshot>>,
     metrics: CommitMetrics,
 }
 
@@ -1052,9 +1105,11 @@ impl PostCommit {
     /// Runs the post commit activities
     async fn run_post_commit_hook(&self) -> DeltaResult<(DeltaTableState, PostCommitMetrics)> {
         if let Some(table) = &self.table_data {
-            let mut snapshot = table.eager_snapshot().clone();
+            let mut snapshot = table.clone();
             if self.version != snapshot.version() {
-                snapshot.update(&self.log_store, Some(self.version)).await?;
+                snapshot = snapshot
+                    .update_from_log_store(self.log_store.as_ref(), Some(self.version))
+                    .await?;
             }
 
             let mut state = DeltaTableState { snapshot };

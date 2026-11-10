@@ -1,7 +1,5 @@
 //! Add a check constraint to a table
 
-use std::sync::Arc;
-
 use datafusion::catalog::Session;
 use datafusion::common::ToDFSchema;
 use datafusion::physical_plan::execute_stream;
@@ -14,20 +12,19 @@ use crate::delta_datafusion::{
     create_session, expr::fmt_expr_to_sql, into_expr,
 };
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
-use crate::kernel::{
-    EagerSnapshot, MetadataExt, ProtocolExt as _, ProtocolInner, resolve_snapshot,
-};
+use crate::kernel::{MetadataExt, ProtocolExt as _, ProtocolInner, Snapshot, resolve_snapshot};
 use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
 use crate::protocol::DeltaOperation;
 use crate::table::Constraint;
 use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Build a constraint to add to a table
 pub struct ConstraintBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Hashmap containing an name of the constraint and expression
     check_constraints: HashMap<String, Expression>,
     /// Delta object store for handling data files
@@ -40,7 +37,7 @@ pub struct ConstraintBuilder {
 
 impl ConstraintBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             check_constraints: Default::default(),
             snapshot,
@@ -134,7 +131,7 @@ impl std::future::IntoFuture for ConstraintBuilder {
                     .ensure_object_store_registered(this.log_store.as_ref())?;
 
                 let proivider = DeltaScanNext::builder()
-                    .with_snapshot(snapshot.snapshot().clone())
+                    .with_snapshot(snapshot.clone())
                     .await?;
                 let schema = proivider.schema().to_dfschema()?;
 

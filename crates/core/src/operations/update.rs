@@ -48,6 +48,7 @@ use crate::datafile::writer::ArrowWriterOptions;
 use crate::delta_datafusion::{
     DeltaScanConfig, Expression, scan_files_where_matches, update_datafusion_session,
 };
+use crate::kernel::Snapshot;
 use crate::kernel::resolve_snapshot;
 use crate::logstore::LogStoreRef;
 use crate::logstore::with_operation;
@@ -64,7 +65,7 @@ use crate::{
         resolve_session_state,
     },
     kernel::{
-        Action, ActiveAddOptions, AddStatsPolicy, EagerSnapshot,
+        Action, ActiveAddOptions, AddStatsPolicy,
         transaction::{CommitBuilder, CommitProperties, PROTOCOL},
     },
 };
@@ -87,7 +88,7 @@ pub struct UpdateBuilder {
     /// How to update columns in a record that match the predicate
     updates: HashMap<Column, Expression>,
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// Datafusion session state relevant for executing the input plan
@@ -121,7 +122,7 @@ pub struct UpdateMetrics {
 
 impl UpdateBuilder {
     /// Create a new ['UpdateBuilder']
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             predicate: None,
             updates: HashMap::new(),
@@ -278,13 +279,11 @@ async fn execute(
     predicate: Expr,
     updates: HashMap<Column, Expression>,
     log_store: LogStoreRef,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     session: &dyn Session,
     writer_properties: DeltaWriterProperties,
     safe_cast: bool,
 ) -> DeltaResult<(Vec<Action>, UpdateMetrics)> {
-    let eager_snapshot = snapshot;
-    let snapshot = eager_snapshot.snapshot();
     // Validate the predicate and update expressions.
     //
     // If the predicate is not set, then all files need to be updated.
@@ -423,7 +422,7 @@ async fn execute(
 
     metrics.execution_time_ms = Instant::now().duration_since(exec_start).as_millis() as u64;
 
-    if let Ok(true) = should_write_cdc(eager_snapshot) {
+    if let Ok(true) = should_write_cdc(snapshot) {
         match tracker.collect() {
             Ok(cdc_plan) => {
                 let cdc_exec = session.create_physical_plan(&cdc_plan).await?;

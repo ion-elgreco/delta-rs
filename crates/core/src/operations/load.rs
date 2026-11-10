@@ -8,15 +8,16 @@ use crate::DeltaTable;
 use crate::delta_datafusion::engine::AsObjectStoreUrl as _;
 use crate::delta_datafusion::{DataFusionMixins as _, create_session};
 use crate::errors::DeltaResult;
+use crate::kernel::Snapshot;
+use crate::kernel::resolve_snapshot;
 use crate::kernel::transaction::PROTOCOL;
-use crate::kernel::{EagerSnapshot, resolve_snapshot};
 use crate::logstore::{LogStoreExt, LogStoreRef};
 use crate::table::state::DeltaTableState;
 
 #[derive(Clone)]
 pub struct LoadBuilder {
     /// A snapshot of the to-be-loaded table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Delta object store for handling data files
     log_store: LogStoreRef,
     /// A sub-selection of columns to be loaded
@@ -36,7 +37,7 @@ impl std::fmt::Debug for LoadBuilder {
 
 impl LoadBuilder {
     /// Create a new [`LoadBuilder`]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,

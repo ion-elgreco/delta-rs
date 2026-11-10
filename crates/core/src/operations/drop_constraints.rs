@@ -1,10 +1,11 @@
 //! Drop a constraint from a table
 
 use futures::future::BoxFuture;
+use std::sync::Arc;
 
 use crate::DeltaTable;
 use crate::kernel::transaction::{CommitProperties, PROTOCOL};
-use crate::kernel::{Action, EagerSnapshot, MetadataExt, SnapshotMetadataRef, resolve_snapshot};
+use crate::kernel::{Action, MetadataExt, Snapshot, SnapshotMetadataRef, resolve_snapshot};
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
 use crate::protocol::DeltaOperation;
@@ -14,7 +15,7 @@ use crate::{DeltaResult, DeltaTableError};
 /// Remove constraints from the table
 pub struct DropConstraintBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// Name of the constraint
     name: Option<String>,
     /// Raise if constraint doesn't exist
@@ -27,7 +28,7 @@ pub struct DropConstraintBuilder {
 
 impl DropConstraintBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             name: None,
             raise_if_not_exists: true,
@@ -99,7 +100,7 @@ impl std::future::IntoFuture for DropConstraintBuilder {
                 .ok_or(DeltaTableError::Generic("No name provided".to_string()))?;
 
             let Some((actions, operation)) = plan_drop_constraint_actions(
-                snapshot.snapshot().metadata_state(),
+                snapshot.metadata_state(),
                 &name,
                 this.raise_if_not_exists,
             )?

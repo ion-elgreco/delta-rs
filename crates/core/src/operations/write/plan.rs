@@ -34,8 +34,8 @@ use crate::delta_datafusion::{
 use crate::errors::{DeltaResult, DeltaTableError};
 use crate::kernel::schema::cast::{merge_arrow_schema, normalize_for_delta};
 use crate::kernel::{
-    Action, ActiveAddOptions, Add, AddStatsPolicy, DeletionVectorDescriptor, EagerSnapshot,
-    Metadata, Protocol, ProtocolExt as _, Remove, Snapshot, StructType, StructTypeExt,
+    Action, ActiveAddOptions, Add, AddStatsPolicy, DeletionVectorDescriptor, Metadata, Protocol,
+    ProtocolExt as _, Remove, Snapshot, StructType, StructTypeExt,
 };
 use crate::logstore::LogStoreRef;
 use crate::operations::cdc::{CDC_COLUMN_NAME, should_write_cdc};
@@ -95,7 +95,7 @@ pub(super) struct PreparedWrite {
 
 /// Inputs required to normalize source rows into table shaped insert data.
 pub(super) struct WritePreparationInput<'a> {
-    pub(super) snapshot: Option<&'a EagerSnapshot>,
+    pub(super) snapshot: Option<&'a Snapshot>,
     pub(super) session: &'a dyn Session,
     pub(super) source: LogicalPlan,
     pub(super) mode: SaveMode,
@@ -423,19 +423,18 @@ pub(super) fn prepare_write(input: WritePreparationInput<'_>) -> DeltaResult<Pre
 }
 
 pub(super) async fn plan_overwrite_rewrite(
-    snapshot: Option<&EagerSnapshot>,
+    snapshot: Option<&Snapshot>,
     log_store: &LogStoreRef,
     session: &dyn Session,
     mode: SaveMode,
     prepared_write: &PreparedWrite,
     write_id: Uuid,
 ) -> DeltaResult<MatchedFilesRewritePlan> {
-    let Some(eager_snapshot) = snapshot else {
+    let Some(snapshot) = snapshot else {
         return Ok(MatchedFilesRewritePlan::passthrough(
             prepared_write.insert_plan.clone(),
         ));
     };
-    let snapshot = eager_snapshot.snapshot();
 
     debug_assert_eq!(
         mode, prepared_write.mode,
@@ -452,7 +451,7 @@ pub(super) async fn plan_overwrite_rewrite(
         Some(predicate) => {
             let analysis = analyze_predicate_for_find_files(
                 predicate.clone(),
-                eager_snapshot.metadata().partition_columns(),
+                snapshot.metadata().partition_columns(),
             )?;
             let mut diagnostics = RewriteDiagnostics {
                 matched_file_count: 0,
@@ -520,7 +519,7 @@ pub(super) async fn plan_overwrite_rewrite(
                 .union(rescued_data)?
                 .build()?;
 
-            let cdc_plan = if should_write_cdc(eager_snapshot)? {
+            let cdc_plan = if should_write_cdc(snapshot)? {
                 Some(
                     LogicalPlanBuilder::new(files_scan.scan().clone())
                         .filter(files_scan.predicate.clone())?
@@ -691,7 +690,7 @@ fn align_plan_to_schema(plan: LogicalPlan, target_plan: &LogicalPlan) -> DeltaRe
 /// The builder's target file size wins (explicit `None` never rolls), then the
 /// writer properties', then the table's.
 fn resolve_target_file_size(
-    snapshot: Option<&EagerSnapshot>,
+    snapshot: Option<&Snapshot>,
     target_file_size: Option<Option<NonZeroU64>>,
     writer_properties: DeltaWriterProperties,
     configuration: &HashMap<String, Option<String>>,
@@ -752,7 +751,7 @@ fn metadata_with_schema_and_partition_columns(
 }
 
 fn schema_delta_for_prepared_source(
-    snapshot: Option<&EagerSnapshot>,
+    snapshot: Option<&Snapshot>,
     insert_plan: &LogicalPlan,
     partition_columns: &[String],
     mode: SaveMode,

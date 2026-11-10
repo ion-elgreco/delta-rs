@@ -60,27 +60,31 @@ properties.
     ```
 
 
-## Loading and materialized metadata
+## Loading and active-file metadata
 
-Normal `DeltaTable` loading collects active-file metadata and statistics in memory.
-It does not read the contents of the data files. Rust `Snapshot::try_new` remains
-lazy: file metadata is replayed when requested. `EagerSnapshot` explicitly
-materializes that metadata. Rust append-only callers can also use `BlindDeltaTable`.
+Loading a `DeltaTable` reads the protocol, the metadata, and the list of log files of
+the table version. It does not read the active files or their statistics. An operation
+that needs the active files reads them from the log at that time. Appends and schema
+changes do not need them, so their memory use does not grow with the number of files
+in the table.
+
+Methods that return the active files, such as `file_uris()` and `get_add_actions()`
+in Python or `DeltaTable::get_file_uris` in Rust, read the log on each call. In Rust,
+`DeltaTable::eager_snapshot` returns an `EagerSnapshot`, which holds the active files
+in memory and gives synchronous access to them through `log_data()`. Keep the
+`EagerSnapshot` if you need the file list more than once. Rust append-only callers can
+also use `BlindDeltaTable`.
 
 The Rust `DeltaTableConfig` loading configuration has been removed. In Python,
 `without_files`, `skip_stats`, and `log_buffer_size` are deprecated compatibility
 arguments and are ignored with a warning when supplied with non-default values.
-Consequently, `without_files=True` no longer reduces the memory used by normal
-table loading. The deprecated `table_config` property reports the effective
-loading defaults, not the ignored arguments. Table properties do not replace
-these loading options.
+`without_files=True` is not necessary: table loading does not read the active files.
+The deprecated `table_config` property reports the effective loading defaults, not the
+ignored arguments. Table properties do not replace these loading options.
 
-Serialized tables written with the old configuration slot can still be read when
-their eager file cache is valid. Historical eager-wrapper payloads with absent files or no-stats caches, or an
-eager payload whose cache is rejected, must be reopened from its table URI so the
-log can be replayed. Deserialization reports an error instead of presenting the
-missing file state as an empty table. Standalone lazy `Snapshot` payloads remain
-readable without a file cache.
+Serialized tables written by earlier releases can still be read. A serialized table
+that contains the active files keeps them in memory after it is read. A serialized
+table without them reads them from the log when an operation needs them.
 
 ## Verify Table Existence
 

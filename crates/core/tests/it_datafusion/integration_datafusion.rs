@@ -2855,7 +2855,7 @@ mod insert_into_tests {
             );
         }
 
-        let file_count = final_table.get_file_uris()?.count();
+        let file_count = final_table.get_file_uris().await?.count();
         assert!(
             file_count > 0,
             "Table should have data files after SQL INSERT"

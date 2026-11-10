@@ -293,7 +293,10 @@ async fn single_file_id_value_table(row_count: i64) -> DeltaTable {
         .await
         .unwrap();
 
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     table
 }
 
@@ -317,7 +320,10 @@ async fn multi_file_id_value_table(file_count: usize, rows_per_file: i64) -> Del
             .unwrap();
     }
 
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), file_count);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        file_count
+    );
     table
 }
 
@@ -340,7 +346,10 @@ async fn single_file_scd_table(row_count: i64) -> DeltaTable {
         .await
         .unwrap();
 
-    assert_eq!(table.snapshot().unwrap().log_data().num_files(), 1);
+    assert_eq!(
+        table.eager_snapshot().await.unwrap().log_data().num_files(),
+        1
+    );
     table
 }
 

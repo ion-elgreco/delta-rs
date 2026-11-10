@@ -288,7 +288,8 @@ mod tests {
         let table = crate::open_table(url::Url::from_directory_path(path).unwrap())
             .await
             .unwrap();
-        let log_data = table.snapshot().unwrap().log_data();
+        let eager = table.eager_snapshot().await.unwrap();
+        let log_data = eager.log_data();
         let max = ScalarValue::TimestampMicrosecond(Some(1666652372846000), Some("UTC".into()));
         let predicate = col("timestamp").gt(lit(max));
 
@@ -327,18 +328,22 @@ mod tests {
         )));
 
         let state = DeltaTableState::from_actions(actions).await.unwrap();
-        let files = files_matching_predicate(state.snapshot().log_data(), &[])
-            .unwrap()
-            .collect::<Vec<_>>();
+        let files =
+            files_matching_predicate(state.snapshot().try_materialized_log_data().unwrap(), &[])
+                .unwrap()
+                .collect::<Vec<_>>();
         assert_eq!(files.len(), 3);
 
         let predictate = col("value")
             .gt(lit::<i32>(10))
             .or(col("value").lt_eq(lit::<i32>(0)));
 
-        let files = files_matching_predicate(state.snapshot().log_data(), &[predictate])
-            .unwrap()
-            .collect::<Vec<_>>();
+        let files = files_matching_predicate(
+            state.snapshot().try_materialized_log_data().unwrap(),
+            &[predictate],
+        )
+        .unwrap()
+        .collect::<Vec<_>>();
         assert_eq!(files.len(), 2);
     }
 }

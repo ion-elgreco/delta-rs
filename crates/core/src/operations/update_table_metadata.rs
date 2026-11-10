@@ -1,11 +1,12 @@
 //! Update table metadata operation
 
 use futures::future::BoxFuture;
+use std::sync::Arc;
 use validator::Validate;
 
 use crate::DeltaTable;
 use crate::kernel::transaction::CommitProperties;
-use crate::kernel::{Action, EagerSnapshot, MetadataExt, SnapshotMetadataRef, resolve_snapshot};
+use crate::kernel::{Action, MetadataExt, Snapshot, SnapshotMetadataRef, resolve_snapshot};
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
 use crate::protocol::DeltaOperation;
@@ -47,7 +48,7 @@ fn validate_at_least_one_field(
 /// Update table metadata operation
 pub struct UpdateTableMetadataBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// The metadata update to apply
     update: Option<TableMetadataUpdate>,
     /// Delta object store for handling data files
@@ -58,7 +59,7 @@ pub struct UpdateTableMetadataBuilder {
 
 impl UpdateTableMetadataBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             update: None,
             snapshot,
@@ -119,7 +120,7 @@ impl std::future::IntoFuture for UpdateTableMetadataBuilder {
                 .map_err(|e| DeltaTableError::MetadataError(format!("{e}")))?;
 
             let (actions, operation) =
-                plan_update_table_metadata_actions(snapshot.snapshot().metadata_state(), update)?;
+                plan_update_table_metadata_actions(snapshot.metadata_state(), update)?;
 
             commit_actions_in_scope(
                 &this.log_store,

@@ -73,12 +73,14 @@ use bytes::{BufMut, BytesMut};
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use object_store::ObjectStoreExt as _;
 use object_store::path::{Path, PathPart};
 use tracing::log::*;
 
-use crate::kernel::{EagerSnapshot, resolve_snapshot};
+use crate::kernel::Snapshot;
+use crate::kernel::resolve_snapshot;
 use crate::logstore::LogStoreRef;
 use crate::logstore::object_store::PutPayload;
 use crate::logstore::with_operation;
@@ -89,7 +91,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 #[derive(Clone)]
 pub struct GenerateBuilder {
     /// A snapshot of the table state to be generated
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     log_store: LogStoreRef,
 }
 
@@ -97,7 +99,7 @@ impl GenerateBuilder {
     /// Create a new [GenerateBuilder]
     ///
     /// Currently only one mode is supported: [GenerateMode::SymlinkFormatManifest]
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             snapshot,
             log_store,

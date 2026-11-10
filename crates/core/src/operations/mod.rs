@@ -36,8 +36,9 @@ use crate::DeltaTable;
 #[cfg(feature = "datafusion")]
 use crate::delta_datafusion::Expression;
 use crate::errors::{DeltaResult, DeltaTableError};
+use crate::kernel::Action;
+use crate::kernel::Snapshot;
 use crate::kernel::transaction::{CommitBuilder, CommitProperties};
-use crate::kernel::{Action, EagerSnapshot};
 use crate::logstore::{LogStoreRef, with_operation};
 use crate::operations::generate::GenerateBuilder;
 use crate::protocol::DeltaOperation;
@@ -87,7 +88,7 @@ mod session_fallback_policy_tests;
 /// snapshot before the scope opens.
 pub(crate) async fn commit_actions_in_scope(
     parent: &LogStoreRef,
-    snapshot: &EagerSnapshot,
+    snapshot: &Snapshot,
     commit_properties: CommitProperties,
     actions: Vec<Action>,
     operation: DeltaOperation,

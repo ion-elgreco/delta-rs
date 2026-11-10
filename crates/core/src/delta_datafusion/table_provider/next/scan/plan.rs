@@ -867,7 +867,7 @@ mod tests {
 
         let plan_for = |expr: &Expr| {
             KernelScanPlan::try_new(
-                snapshot.snapshot(),
+                snapshot,
                 None,
                 std::slice::from_ref(expr),
                 &scan_config,
@@ -921,7 +921,7 @@ mod tests {
 
         let expr = col(r#""Super Name""#).eq(lit("Anthony Johnson"));
         let scan_plan = KernelScanPlan::try_new(
-            table.snapshot()?.snapshot().snapshot(),
+            table.snapshot()?.snapshot(),
             None,
             std::slice::from_ref(&expr),
             &DeltaScanConfig::default(),
@@ -933,7 +933,7 @@ mod tests {
 
         let expr = col(r#""Company Very Short""#).eq(lit("BME"));
         let scan_plan = KernelScanPlan::try_new(
-            table.snapshot()?.snapshot().snapshot(),
+            table.snapshot()?.snapshot(),
             None,
             std::slice::from_ref(&expr),
             &DeltaScanConfig::default(),
@@ -943,7 +943,7 @@ mod tests {
 
         let expr = col(r#""Super Name""#).eq(lit("Timothy Lamb"));
         let scan_plan = KernelScanPlan::try_new(
-            table.snapshot()?.snapshot().snapshot(),
+            table.snapshot()?.snapshot(),
             None,
             std::slice::from_ref(&expr),
             &DeltaScanConfig::default(),
@@ -1052,7 +1052,7 @@ mod tests {
         let mut table = open_fs_path("../test/tests/data/table_with_column_mapping");
         table.load().await?;
 
-        let snapshot = table.snapshot()?.snapshot().snapshot();
+        let snapshot = table.snapshot()?.snapshot();
 
         let override_schema = Arc::new(Schema::new(vec![
             Arc::new(arrow_schema::Field::new(
@@ -1149,7 +1149,7 @@ mod tests {
 
         let mut partitioned_table = open_fs_path("../test/tests/data/delta-0.8.0-partitioned");
         partitioned_table.load().await?;
-        let partitioned_snapshot = partitioned_table.snapshot()?.snapshot().snapshot();
+        let partitioned_snapshot = partitioned_table.snapshot()?.snapshot();
         let scan_plan = KernelScanPlan::try_new(
             partitioned_snapshot,
             None,
@@ -1338,7 +1338,7 @@ mod tests {
         let mut table = open_fs_path("../test/tests/data/table_with_column_mapping");
         table.load().await?;
 
-        let snapshot = table.snapshot()?.snapshot().snapshot();
+        let snapshot = table.snapshot()?.snapshot();
         let config = DeltaScanConfig::default().with_file_column_name("file_id");
         let filter = col(r#""Super Name""#).eq(lit("Anthony Johnson"));
         let scan_plan = KernelScanPlan::try_new(snapshot, None, &[filter], &config, None)?;
@@ -1378,7 +1378,7 @@ mod tests {
         let mut table = open_fs_path("../test/tests/data/table_with_column_mapping");
         table.load().await?;
 
-        let snapshot = table.snapshot()?.snapshot().snapshot();
+        let snapshot = table.snapshot()?.snapshot();
         let config = DeltaScanConfig::default();
         let table_schema = config.table_schema(snapshot.table_configuration())?;
         let projection = vec![table_schema.index_of("Super Name")?];
@@ -1472,7 +1472,7 @@ mod tests {
         let mut table = open_fs_path("../test/tests/data/delta-0.8.0-partitioned");
         table.load().await?;
 
-        let snapshot = table.snapshot()?.snapshot().snapshot();
+        let snapshot = table.snapshot()?.snapshot();
         let scan_plan = KernelScanPlan::try_new(
             snapshot,
             None,
@@ -1525,7 +1525,7 @@ mod tests {
         let mut table = open_fs_path("../test/tests/data/COVID-19_NYT");
         table.load().await.unwrap();
 
-        let snapshot = table.snapshot().unwrap().snapshot().snapshot();
+        let snapshot = table.snapshot().unwrap().snapshot();
         let filter = and(
             col("state").eq(lit("Louisiana")),
             col("county").eq(lit("Cameron")),

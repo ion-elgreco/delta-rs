@@ -324,7 +324,7 @@ async fn test_vacuum_struct_column_without_min_max_eligible_leaves() -> TestResu
     let table = table.write(vec![batch(vec![4], vec!["d"])]).await?;
 
     // Parsed statistics must carry `id` only, with no empty `payload` struct.
-    let add_actions = table.snapshot()?.add_actions_table(true)?;
+    let add_actions = table.eager_snapshot().await?.add_actions_table(true)?;
     let add_actions_schema = add_actions.schema();
     let columns = add_actions_schema.fields();
     assert!(columns.iter().any(|field| field.name() == "min.id"));

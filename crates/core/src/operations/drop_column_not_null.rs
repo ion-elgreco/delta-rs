@@ -7,12 +7,12 @@
 
 use delta_kernel::schema::StructType;
 use futures::future::BoxFuture;
+use std::sync::Arc;
 
 use crate::DeltaTable;
 use crate::kernel::transaction::CommitProperties;
 use crate::kernel::{
-    Action, EagerSnapshot, MetadataExt as _, ProtocolExt as _, SnapshotMetadataRef,
-    resolve_snapshot,
+    Action, MetadataExt as _, ProtocolExt as _, Snapshot, SnapshotMetadataRef, resolve_snapshot,
 };
 use crate::logstore::LogStoreRef;
 use crate::operations::commit_actions_in_scope;
@@ -22,7 +22,7 @@ use crate::{DeltaResult, DeltaTableError};
 /// Drop the `NOT NULL` constraint on a top-level column, making it nullable.
 pub struct DropColumnNotNullBuilder {
     /// A snapshot of the table's state
-    snapshot: Option<EagerSnapshot>,
+    snapshot: Option<Arc<Snapshot>>,
     /// The name of the column whose `NOT NULL` constraint should be dropped
     column_name: String,
     /// Delta object store for handling data files
@@ -33,7 +33,7 @@ pub struct DropColumnNotNullBuilder {
 
 impl DropColumnNotNullBuilder {
     /// Create a new builder
-    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<EagerSnapshot>) -> Self {
+    pub(crate) fn new(log_store: LogStoreRef, snapshot: Option<Arc<Snapshot>>) -> Self {
         Self {
             column_name: String::new(),
             snapshot,
@@ -126,10 +126,8 @@ impl std::future::IntoFuture for DropColumnNotNullBuilder {
         Box::pin(async move {
             let snapshot = resolve_snapshot(&this.log_store, this.snapshot.clone(), None).await?;
 
-            let (actions, operation) = plan_drop_column_not_null_actions(
-                snapshot.snapshot().metadata_state(),
-                &this.column_name,
-            )?;
+            let (actions, operation) =
+                plan_drop_column_not_null_actions(snapshot.metadata_state(), &this.column_name)?;
 
             commit_actions_in_scope(
                 &this.log_store,

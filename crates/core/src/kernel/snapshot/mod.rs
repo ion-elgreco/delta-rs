@@ -63,6 +63,7 @@ mod iterators;
 mod log_data;
 mod scan;
 mod serde;
+pub(crate) use self::serde::table_state_serde;
 mod stats_projection;
 mod stream;
 
@@ -166,12 +167,12 @@ impl<'a> ConflictReadSet<'a> {
     }
 
     fn from_owned_batches(
-        batches: Vec<RecordBatch>,
+        batches: Arc<Vec<RecordBatch>>,
         table_configuration: &'a TableConfiguration,
     ) -> Self {
         Self {
             inner: ConflictReadSetInner::Owned {
-                batches: Arc::new(batches),
+                batches,
                 table_configuration,
             },
         }
@@ -519,10 +520,12 @@ impl Snapshot {
     ///
     /// Snapshots borrow materialized log data that supports parsed stats. A cache
     /// miss replays active adds with parsed stats and stores the batches in the
-    /// read set. Replay leaves the snapshot cache unchanged.
+    /// read set and in `replayed`. A later call for the same snapshot reuses `replayed`.
+    /// Replay leaves the snapshot cache unchanged.
     pub(crate) async fn conflict_read_set(
         &self,
         log_store: &dyn LogStore,
+        replayed: &mut Option<Arc<Vec<RecordBatch>>>,
     ) -> DeltaResult<ConflictReadSet<'_>> {
         if let Some(materialized_files) = self.materialized_files_for(AddStatsPolicy::Parsed) {
             return Ok(ConflictReadSet::from_log_data(LogDataHandler::new(
@@ -531,15 +534,18 @@ impl Snapshot {
             )));
         }
 
-        let batches = self
-            .active_add_batches(
-                log_store,
-                ActiveAddOptions {
+        let batches = match replayed {
+            Some(batches) => Arc::clone(batches),
+            None => {
+                let options = ActiveAddOptions {
                     predicate: None,
                     stats: AddStatsPolicy::Parsed,
-                },
-            )
-            .await?;
+                };
+                let batches = Arc::new(self.active_add_batches(log_store, options).await?);
+                *replayed = Some(Arc::clone(&batches));
+                batches
+            }
+        };
         Ok(ConflictReadSet::from_owned_batches(
             batches,
             self.table_configuration(),
@@ -877,7 +883,9 @@ impl Snapshot {
         log_store: &dyn LogStore,
         predicate: Option<PredicateRef>,
     ) -> BoxStream<'_, DeltaResult<LogicalFileView>> {
-        self.files(log_store, predicate)
+        // Parsed statistics are part of what a file view gives, for example through
+        // `LogicalFileView::min_values`. A replay from the log must produce them too.
+        self.files_with_stats_policy(log_store, predicate, AddStatsPolicy::Parsed)
             .map_ok(|batch| {
                 futures::stream::iter(0..batch.num_rows()).map(move |idx| {
                     Ok::<_, DeltaTableError>(LogicalFileView::new(batch.clone(), idx))
@@ -1071,6 +1079,55 @@ impl Snapshot {
             .map_ok(|removes| futures::stream::iter(removes.map(Ok::<_, DeltaTableError>)))
             .try_flatten()
             .boxed()
+    }
+
+    /// Update the snapshot to the given version, or to the latest version of the table.
+    ///
+    /// Active files held in memory stay in memory and are updated. A snapshot without them
+    /// stays without them.
+    pub(crate) async fn update_from_log_store(
+        self: Arc<Self>,
+        log_store: &dyn LogStore,
+        target_version: Option<Version>,
+    ) -> DeltaResult<Arc<Self>> {
+        // Catalog-managed tables: the incremental (filesystem-only) update path below can't see
+        // ratified-but-unpublished commits, and the catalog — not the filesystem — decides the
+        // latest version. Rebuild from the catalog-provided log tail instead.
+        // TODO(catalog-commits): make this incremental once kernel `builder_from` is wired with a
+        // refreshed catalog log tail.
+        if log_store.catalog_log_tail().await?.is_some() {
+            let snapshot = Arc::new(Snapshot::try_new(log_store, target_version).await?);
+            return if self.materialized_files().is_some() {
+                snapshot.ensure_materialized_files(log_store).await
+            } else {
+                Ok(snapshot)
+            };
+        }
+        self.update(log_store.engine(), target_version).await
+    }
+
+    /// Get the timestamp of the given version, if its commit file is part of this snapshot.
+    pub fn version_timestamp(&self, version: Version) -> Option<i64> {
+        self.inner
+            .log_segment()
+            .listed
+            .ascending_commit_files
+            .iter()
+            .find(|path| path.version == version)
+            .map(|path| path.location.last_modified)
+    }
+
+    /// Return the latest committed transaction version for the given application id, if any.
+    ///
+    /// This is used to implement idempotent writes: an application records its own monotonic
+    /// version via a transaction action, and readers can recover the last value seen.
+    pub async fn transaction_version(
+        &self,
+        log_store: &dyn LogStore,
+        app_id: impl ToString,
+    ) -> DeltaResult<Option<i64>> {
+        self.application_transaction_version(log_store, app_id.to_string())
+            .await
     }
 
     /// Fetch the latest version of the provided application_id for this snapshot.
@@ -1312,11 +1369,15 @@ async fn read_last_checkpoint_version(
     .map_err(|e| DeltaTableError::Generic(e.to_string()))?
 }
 
+/// Return the snapshot an operation runs on: the provided one, or a new one read from the log.
+///
+/// The snapshot is not required to hold the active files in memory. An operation that needs
+/// them reads them from the log through [`Snapshot::file_views`] and related methods.
 pub(crate) async fn resolve_snapshot(
     log_store: &dyn LogStore,
-    maybe_snapshot: Option<EagerSnapshot>,
+    maybe_snapshot: Option<Arc<Snapshot>>,
     version: Option<Version>,
-) -> DeltaResult<EagerSnapshot> {
+) -> DeltaResult<Arc<Snapshot>> {
     if let Some(snapshot) = maybe_snapshot {
         if let Some(version) = version
             && snapshot.version() as Version != version
@@ -1325,9 +1386,15 @@ pub(crate) async fn resolve_snapshot(
                 "Provided snapshot version does not match the requested version".to_string(),
             ));
         }
-        snapshot.with_files(log_store).await
+        Ok(snapshot)
     } else {
-        EagerSnapshot::try_new(log_store, version).await
+        Ok(Arc::new(Snapshot::try_new(log_store, version).await?))
+    }
+}
+
+impl From<EagerSnapshot> for Arc<Snapshot> {
+    fn from(snapshot: EagerSnapshot) -> Self {
+        snapshot.into_snapshot()
     }
 }
 
@@ -1338,11 +1405,10 @@ impl EagerSnapshot {
         Self::try_new_with_snapshot(log_store, snapshot.into()).await
     }
 
-    /// Materialize active-file metadata through kernel replay; this does not set a kernel scan mode.
-    /// Direct [`Snapshot`] construction remains lazy, while this constructor and
-    /// [`resolve_snapshot`] require materialized files, including for metadata-only callers.
-    /// See [issue 4584](https://github.com/delta-io/delta-rs/issues/4584) for the ongoing migration.
-    pub(crate) async fn try_new_with_snapshot(
+    /// Read the active files of `snapshot` into memory through kernel replay.
+    ///
+    /// A snapshot that already holds them is used as it is.
+    pub async fn try_new_with_snapshot(
         log_store: &dyn LogStore,
         snapshot: Arc<Snapshot>,
     ) -> DeltaResult<Self> {
@@ -1350,43 +1416,30 @@ impl EagerSnapshot {
         Ok(Self { snapshot })
     }
 
-    pub(crate) async fn with_files(self, log_store: &dyn LogStore) -> DeltaResult<Self> {
-        let snapshot = self.snapshot.ensure_materialized_files(log_store).await?;
-        Ok(Self { snapshot })
-    }
-
-    /// Update the snapshot to the given version
-    pub(crate) async fn update(
+    /// Update the snapshot to the given version, or to the latest version of the table.
+    ///
+    /// The active files held in memory are updated too.
+    pub async fn update(
         &mut self,
         log_store: &dyn LogStore,
         target_version: Option<Version>,
     ) -> DeltaResult<()> {
-        // Catalog-managed tables: the incremental (filesystem-only) update path below can't see
-        // ratified-but-unpublished commits, and the catalog — not the filesystem — decides the
-        // latest version. Rebuild from the catalog-provided log tail instead.
-        // TODO(catalog-commits): make this incremental once kernel `builder_from` is wired with a
-        // refreshed catalog log tail.
-        if log_store.catalog_log_tail().await?.is_some() {
-            *self = EagerSnapshot::try_new(log_store, target_version).await?;
-            return Ok(());
-        }
-
-        let previous_snapshot = self.snapshot.clone();
-        let updated_snapshot = previous_snapshot
+        self.snapshot = self
+            .snapshot
             .clone()
-            .update(log_store.engine(), target_version)
+            .update_from_log_store(log_store, target_version)
             .await?;
-        if Arc::ptr_eq(&updated_snapshot, &previous_snapshot) {
-            return Ok(());
-        }
-
-        self.snapshot = updated_snapshot;
         Ok(())
     }
 
     /// Get the underlying snapshot
-    pub(crate) fn snapshot(&self) -> &Snapshot {
+    pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
+    }
+
+    /// Get the underlying snapshot, together with the active files held in memory.
+    pub fn into_snapshot(self) -> Arc<Snapshot> {
+        self.snapshot
     }
 
     /// Get the table version of the snapshot
@@ -1396,18 +1449,7 @@ impl EagerSnapshot {
 
     /// Get the timestamp of the given version
     pub fn version_timestamp(&self, version: Version) -> Option<i64> {
-        for path in &self
-            .snapshot
-            .inner
-            .log_segment()
-            .listed
-            .ascending_commit_files
-        {
-            if path.version == version {
-                return Some(path.location.last_modified);
-            }
-        }
-        None
+        self.snapshot.version_timestamp(version)
     }
 
     /// Get the table schema of the snapshot
@@ -1494,9 +1536,7 @@ impl EagerSnapshot {
         log_store: &dyn LogStore,
         app_id: impl ToString,
     ) -> DeltaResult<Option<i64>> {
-        self.snapshot
-            .application_transaction_version(log_store, app_id.to_string())
-            .await
+        self.snapshot.transaction_version(log_store, app_id).await
     }
 
     /// Return the configuration string stored for the given metadata `domain`, if present.
@@ -2065,7 +2105,9 @@ mod tests {
         let log_store = TestTables::Simple.table_builder()?.build_storage()?;
         let snapshot = Snapshot::try_new(log_store.as_ref(), None).await?;
 
-        let read_set = snapshot.conflict_read_set(log_store.as_ref()).await?;
+        let read_set = snapshot
+            .conflict_read_set(log_store.as_ref(), &mut None)
+            .await?;
 
         assert_eq!(read_set.log_data().num_files(), 5);
         assert!(!snapshot.has_materialized_files_for_test());
@@ -2082,8 +2124,12 @@ mod tests {
             .ensure_materialized_files(log_store.as_ref())
             .await?;
 
-        let lazy_read_set = lazy.conflict_read_set(log_store.as_ref()).await?;
-        let materialized_read_set = materialized.conflict_read_set(log_store.as_ref()).await?;
+        let lazy_read_set = lazy
+            .conflict_read_set(log_store.as_ref(), &mut None)
+            .await?;
+        let materialized_read_set = materialized
+            .conflict_read_set(log_store.as_ref(), &mut None)
+            .await?;
         let lazy_log_data = lazy_read_set.log_data();
         let materialized_log_data = materialized_read_set.log_data();
         let lazy_files = lazy_log_data.iter().collect::<Vec<_>>();
@@ -2458,11 +2504,7 @@ mod tests {
         assert_eq!(lazy_paths.len(), 5);
         assert!(!lazy.has_materialized_files_for_test());
 
-        let eager = EagerSnapshot {
-            snapshot: lazy.clone(),
-        }
-        .with_files(&log_store)
-        .await?;
+        let eager = EagerSnapshot::try_new_with_snapshot(&log_store, lazy.clone()).await?;
         assert!(eager.snapshot().has_materialized_files_for_test());
         assert!(!lazy.has_materialized_files_for_test());
         assert_eq!(

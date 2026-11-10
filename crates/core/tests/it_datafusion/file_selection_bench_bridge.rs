@@ -73,7 +73,7 @@ async fn test_out_of_crate_bridge_exposes_file_selection_paths() -> TestResult {
         partition_result.candidates[0].path
     );
 
-    let mem_table = bench_support::add_actions_partition_mem_table(&snapshot)?
+    let mem_table = bench_support::add_actions_partition_mem_table(&table.eager_snapshot().await?)?
         .expect("partition mem table should exist");
     let field_names = mem_table
         .schema()

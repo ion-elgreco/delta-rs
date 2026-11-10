@@ -57,9 +57,9 @@ pub async fn create_and_write(
     table
 }
 
-fn assert_committed(table: &DeltaTable) {
+async fn assert_committed(table: &DeltaTable) {
     assert_eq!(table.version(), Some(1), "table at version 1");
-    let files: Vec<_> = table.get_file_uris().unwrap().collect();
+    let files: Vec<_> = table.get_file_uris().await.unwrap().collect();
     assert_eq!(files.len(), 1, "exactly one data file was committed");
 }
 
@@ -74,7 +74,7 @@ pub async fn roundtrip(table_uri: &str, storage_options: HashMap<String, String>
         .load()
         .await
         .expect("reopen table");
-    assert_committed(&reopened);
+    assert_committed(&reopened).await;
 }
 
 /// Round-trip for the in-memory backend, whose OpenDAL operator is not shared
@@ -83,5 +83,5 @@ pub async fn roundtrip(table_uri: &str, storage_options: HashMap<String, String>
 pub async fn roundtrip_same_handle(table_uri: &str, storage_options: HashMap<String, String>) {
     let mut table = create_and_write(table_uri, storage_options).await;
     table.load().await.expect("reload table");
-    assert_committed(&table);
+    assert_committed(&table).await;
 }
