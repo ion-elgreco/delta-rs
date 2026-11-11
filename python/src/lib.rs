@@ -39,6 +39,9 @@ use deltalake::datafile::properties::{DEFAULT_PARQUET_PROPERTIES, OPTIMIZE_PARQU
 use deltalake::delta_datafusion::create_session_state_with_spill_config;
 use deltalake::delta_datafusion::expr::parse_sql_predicate_to_kernel;
 use deltalake::errors::DeltaTableError;
+use deltalake::kernel::file_list_cache::{
+    FileListCacheConfig, install_file_list_cache, uninstall_file_list_cache,
+};
 use deltalake::kernel::scalars::ScalarExt;
 use deltalake::kernel::transaction::{CommitBuilder, CommitProperties, TableReference};
 use deltalake::kernel::{
@@ -79,6 +82,7 @@ use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::future::IntoFuture;
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time;
@@ -2728,6 +2732,44 @@ fn shutdown_tracing() -> PyResult<()> {
     Ok(())
 }
 
+/// Turn on the cache of the active file list for all tables of this process.
+#[pyfunction]
+#[pyo3(signature = (memory_bytes, directory=None, disk_bytes=None))]
+fn configure_file_list_cache(
+    py: Python<'_>,
+    memory_bytes: usize,
+    directory: Option<PathBuf>,
+    disk_bytes: Option<usize>,
+) -> PyResult<()> {
+    let mut config = FileListCacheConfig::new(memory_bytes);
+    if let Some(directory) = directory {
+        config = config.with_directory(directory);
+    }
+    if let Some(disk_bytes) = disk_bytes {
+        config = config.with_disk_bytes(disk_bytes);
+    }
+    py.detach(|| rt().block_on(install_file_list_cache(config)))
+        .map_err(PythonError::from)?;
+    Ok(())
+}
+
+/// Turn on the file list cache when the environment configures it. Returns if it is on.
+#[pyfunction]
+fn _configure_file_list_cache_from_env(py: Python<'_>) -> PyResult<bool> {
+    let Some(config) = FileListCacheConfig::from_env().map_err(PythonError::from)? else {
+        return Ok(false);
+    };
+    py.detach(|| rt().block_on(install_file_list_cache(config)))
+        .map_err(PythonError::from)?;
+    Ok(true)
+}
+
+/// Turn off the cache of the active file list.
+#[pyfunction]
+fn disable_file_list_cache(py: Python<'_>) {
+    py.detach(|| rt().block_on(uninstall_file_list_cache()));
+}
+
 #[derive(FromPyObject)]
 pub struct PyAddAction {
     path: String,
@@ -3371,6 +3413,12 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(rust_core_version, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(init_tracing, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(shutdown_tracing, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(configure_file_list_cache, m)?)?;
+    m.add_function(pyo3::wrap_pyfunction!(
+        _configure_file_list_cache_from_env,
+        m
+    )?)?;
+    m.add_function(pyo3::wrap_pyfunction!(disable_file_list_cache, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(create_deltalake, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(create_table_with_add_actions, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(write_to_deltalake, m)?)?;

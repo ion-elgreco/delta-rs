@@ -103,6 +103,7 @@ version = "2"
 features = [
     "azure",
     "datafusion",
+    "delta-cache",
     "gcs",
     "hdfs",
     "lakefs",

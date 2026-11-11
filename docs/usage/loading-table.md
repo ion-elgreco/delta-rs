@@ -86,6 +86,67 @@ Serialized tables written by earlier releases can still be read. A serialized ta
 that contains the active files keeps them in memory after it is read. A serialized
 table without them reads them from the log when an operation needs them.
 
+## Caching the active file list
+
+Methods that return the complete list of active files read the Delta log on each call.
+For a process that calls them many times, or that keeps running while the table gets new
+commits, you can turn on a cache for the file list. The cache is off by default.
+
+=== "Python"
+
+    ```python
+    import deltalake
+
+    deltalake.configure_file_list_cache(
+        memory_bytes=64 * 1024 * 1024,
+        directory="/var/cache/deltalake",
+    )
+
+    dt = deltalake.DeltaTable("<path/to/table>")
+    dt.file_uris()  # reads the log and fills the cache
+    dt.file_uris()  # reads the cache
+    ```
+
+=== "Rust"
+
+    ```rust
+    use deltalake::kernel::file_list_cache::{FileListCacheConfig, install_file_list_cache};
+
+    // Needs the `delta-cache` feature.
+    let config = FileListCacheConfig::new(64 * 1024 * 1024).with_directory("/var/cache/deltalake");
+    install_file_list_cache(config).await?;
+    ```
+
+The cache applies to all tables of the process, also to new `DeltaTable` instances of a
+table. It stores the file list of one table version. A read at a newer version reads only
+the commits after the stored version.
+
+The cache serves `file_uris()`, `get_add_actions()`, `DeltaTable::eager_snapshot`, and the
+internal reads of the complete file list, for example in the conflict check of a commit.
+Reads that filter the files do not use it. These are queries and the scans of `merge`,
+`update`, and `delete`.
+
+| Setting | Python and Rust | Environment variable |
+| --- | --- | --- |
+| Memory for cache entries | `memory_bytes` | `DELTA_FILE_LIST_CACHE_CAPACITY_BYTES`. The cache is on when this is set. |
+| Directory for entries on disk | `directory` | `DELTA_CACHE_DIR`. The cache uses the `file-list` directory below it. |
+| Disk space, 8 GiB by default | `disk_bytes` | `DELTA_FILE_LIST_CACHE_DISK_CAPACITY_BYTES` |
+
+Things to know:
+
+- The memory setting limits the cache entries that stay in memory. It does not limit the
+  memory of a call that returns the file list.
+- Without a directory, the cache keeps a table only when its file list fits in the memory
+  setting. A file list needs about 600 bytes for each file.
+- Only one process at a time can use a directory. Entries on disk stay available after a
+  restart.
+- The cache keeps 16 files open for each GiB of disk space.
+- The directory holds file paths and column statistics (minimum and maximum values) of
+  the tables in plain form.
+- Catalog-managed tables do not use the cache.
+- The Python package reads the environment variables at import. A Rust program calls
+  `FileListCacheConfig::from_env` and `install_file_list_cache`.
+
 ## Verify Table Existence
 
 You can check whether or not a Delta table exists at a particular path by using

@@ -1,5 +1,7 @@
 import atexit
-from typing import Optional
+import os
+import warnings
+from typing import Optional, Union
 
 from deltalake import table
 from deltalake._internal import (
@@ -9,7 +11,12 @@ from deltalake._internal import (
     TableFeatures,
     Transaction,
     __version__,
+    _configure_file_list_cache_from_env,
+    disable_file_list_cache,
     rust_core_version,
+)
+from deltalake._internal import (
+    configure_file_list_cache as _configure_file_list_cache,
 )
 from deltalake._internal import (
     init_tracing as _init_tracing,
@@ -79,6 +86,71 @@ def init_tracing(endpoint: Optional[str] = None) -> None:
     """
     _init_tracing(endpoint)
     atexit.register(_shutdown_tracing)
+
+
+def configure_file_list_cache(
+    memory_bytes: int,
+    directory: Optional[Union[str, "os.PathLike[str]"]] = None,
+    disk_bytes: Optional[int] = None,
+) -> None:
+    """
+    Turn on the cache of the active file list for all tables of this process.
+
+    A `DeltaTable` does not keep the list of active files in memory. Methods such as
+    `file_uris()` and `get_add_actions()` read the Delta log on each call. With this
+    cache, the first call for a table stores the list, and a later call reads it from
+    the cache. A later call on a newer table version reads only the new commits. This
+    also applies to a new `DeltaTable` instance of the same table.
+
+    The cache serves reads of the complete file list. Reads that filter the files,
+    such as queries and the scans of `merge`, `update`, and `delete`, do not use it.
+
+    Args:
+        memory_bytes: Memory that the cache can use for entries.
+        directory: Directory for cache entries on disk. Entries on disk stay available
+            after a restart. Without a directory, the cache keeps a table only when its
+            file list fits in `memory_bytes`. A file list needs about 600 bytes for
+            each file.
+        disk_bytes: Disk space that the cache can use in `directory`. The default is
+            8 GiB. The cache keeps 16 files open for each GiB.
+
+    Note:
+        - Only one process at a time can use a directory.
+        - The directory holds file paths and column statistics (minimum and maximum
+          values) of the tables in plain form.
+        - The cache can also be turned on with environment variables:
+          `DELTA_FILE_LIST_CACHE_CAPACITY_BYTES` (memory, turns the cache on),
+          `DELTA_CACHE_DIR` (the cache uses the `file-list` directory below it), and
+          `DELTA_FILE_LIST_CACHE_DISK_CAPACITY_BYTES`.
+
+    Examples:
+        ```python
+        import deltalake
+
+        deltalake.configure_file_list_cache(
+            memory_bytes=64 * 1024 * 1024,
+            directory="/var/cache/deltalake",
+        )
+        dt = deltalake.DeltaTable("my_table")
+        dt.file_uris()  # reads the log and fills the cache
+        dt.file_uris()  # reads the cache
+        ```
+    """
+    _configure_file_list_cache(
+        memory_bytes,
+        None if directory is None else os.fspath(directory),
+        disk_bytes,
+    )
+
+
+try:
+    _configure_file_list_cache_from_env()
+except Exception as err:
+    warnings.warn(
+        f"The file list cache is off, the configuration from the environment failed: {err}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
 
 
 # Support nanosecond timestamps:
@@ -154,7 +226,9 @@ __all__ = [
     "VariantType",
     "WriterProperties",
     "__version__",
+    "configure_file_list_cache",
     "convert_to_deltalake",
+    "disable_file_list_cache",
     "enable_nanosecond_timestamps",
     "init_tracing",
     "rust_core_version",
