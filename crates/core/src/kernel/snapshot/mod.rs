@@ -59,6 +59,8 @@ pub use iterators::*;
 pub use scan::*;
 pub use stream::*;
 
+#[cfg(feature = "delta-cache")]
+pub mod file_list_cache;
 mod iterators;
 mod log_data;
 mod scan;
@@ -464,6 +466,15 @@ impl Snapshot {
             return Ok(self);
         }
 
+        #[cfg(feature = "delta-cache")]
+        if let Some(files) = file_list_cache::cached_files(&self, log_store) {
+            let batches = files.try_collect().await?;
+            let materialized_files = Arc::new(MaterializedFiles::full(self.as_ref(), batches));
+            return Ok(Arc::new(
+                self.with_materialized_files(Some(materialized_files)),
+            ));
+        }
+
         self.materialize_files_with_engine(log_store.engine(), None)
             .await
     }
@@ -605,6 +616,12 @@ impl Snapshot {
         {
             return cached;
         }
+        #[cfg(feature = "delta-cache")]
+        if predicate.is_none()
+            && let Some(cached) = file_list_cache::cached_files(self, log_store)
+        {
+            return cached;
+        }
         match self
             .materialized_files()
             .and_then(|materialized_files| materialized_files.full_table_seed())
@@ -740,6 +757,12 @@ impl Snapshot {
         let skip_stats = matches!(stats_policy, AddStatsPolicy::None);
         if predicate.is_none()
             && let Some(cached) = self.cached_parsed_batches_for(stats_policy)
+        {
+            return cached;
+        }
+        #[cfg(feature = "delta-cache")]
+        if predicate.is_none()
+            && let Some(cached) = file_list_cache::cached_files(self, log_store)
         {
             return cached;
         }

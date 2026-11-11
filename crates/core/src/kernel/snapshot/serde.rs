@@ -196,7 +196,7 @@ fn materialized_files_from_legacy_eager_payload(
     ))))
 }
 
-fn serialize_batches(batches: &[arrow_array::RecordBatch]) -> Result<Vec<u8>, String> {
+pub(super) fn serialize_batches(batches: &[arrow_array::RecordBatch]) -> Result<Vec<u8>, String> {
     if batches.is_empty() {
         return Ok(vec![]);
     }
@@ -216,8 +216,10 @@ fn serialize_batches(batches: &[arrow_array::RecordBatch]) -> Result<Vec<u8>, St
     Ok(buffer)
 }
 
-fn deserialize_batches(data: Vec<u8>) -> Result<Vec<arrow_array::RecordBatch>, String> {
-    if data.is_empty() {
+pub(super) fn deserialize_batches<T: AsRef<[u8]>>(
+    data: T,
+) -> Result<Vec<arrow_array::RecordBatch>, String> {
+    if data.as_ref().is_empty() {
         return Ok(vec![]);
     }
 

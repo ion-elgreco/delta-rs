@@ -134,7 +134,7 @@ native-tls = ["delta_kernel_default_engine/native-tls"]
 rustls = ["delta_kernel_default_engine/rustls"]
 cloud = ["object_store/cloud", "dep:humantime"]
 
-# enable caching some file I/O operations when scanning delta logs
+# enable the cache of the active file list (kernel::file_list_cache)
 delta-cache = ["foyer", "tempfile", "url/serde"]
 
 # Experimental support for nanosecond timestamps primitive type
@@ -166,7 +166,7 @@ name = "json_parsing"
 harness = false
 
 [package.metadata.cargo-machete]
-ignored = ["foyer", "alloc-stdlib", "brotli-decompressor"]
+ignored = ["alloc-stdlib", "brotli-decompressor"]
 
 [lints]
 workspace = true

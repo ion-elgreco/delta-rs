@@ -84,7 +84,7 @@ jobs:
         os: ${{ fromJSON(needs.test-matrix.outputs.targets) }}
     runs-on: ${{ matrix.os }}
     env:
-      DEFAULT_FEATURES: "datafusion"
+      DEFAULT_FEATURES: "datafusion,delta-cache"
       CARGO_LLVM_COV_RUSTC_WRAPPER: "sccache"
       NEXTEST_PROFILE: "ci"
 
