@@ -1,3 +1,5 @@
+import os
+import sys
 import warnings
 from datetime import date, datetime
 from typing import Any
@@ -19,6 +21,23 @@ def encode_partition_value(val: Any) -> str:
         return val.decode("unicode_escape", "backslashreplace")
     else:
         raise ValueError(f"Could not encode partition value for type: {val}")
+
+
+def deprecate_uc_uri(table_uri: str | os.PathLike[str]) -> None:
+    """Warn when `table_uri` is a `uc://` URI. The warning is for the caller of this package."""
+    if not str(table_uri).startswith("uc://"):
+        return
+    package = os.path.dirname(__file__) + os.sep
+    frame, stacklevel = sys._getframe(), 1
+    while frame.f_back and frame.f_code.co_filename.startswith(package):
+        frame, stacklevel = frame.f_back, stacklevel + 1
+    warnings.warn(
+        "A `uc://` table URI is deprecated and will be removed in a future release. "
+        "Open the table with `DeltaTable.from_catalog(UnityCatalog(...), "
+        "'catalog.schema.table')` instead.",
+        DeprecationWarning,
+        stacklevel=stacklevel,
+    )
 
 
 def deprecate_positional_commit_args(

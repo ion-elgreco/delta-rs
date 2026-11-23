@@ -85,6 +85,7 @@ nav:
       - api/schema.md
       - api/storage.md
       - api/query.md
+      - api/catalog.md
       - api/transaction.md
       - api/exceptions.md
   - Integrations:

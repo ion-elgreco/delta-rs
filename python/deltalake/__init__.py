@@ -17,6 +17,7 @@ from deltalake._internal import (
 from deltalake._internal import (
     shutdown_tracing as _shutdown_tracing,
 )
+from deltalake.catalog import UnityCatalog
 from deltalake.query import QueryBuilder
 from deltalake.schema import DataType, Field, Schema, VariantType
 from deltalake.table import DeltaTable, Metadata, TableProperty
@@ -151,6 +152,7 @@ __all__ = [
     "TableFeatures",
     "TableProperty",
     "Transaction",
+    "UnityCatalog",
     "VariantType",
     "WriterProperties",
     "__version__",

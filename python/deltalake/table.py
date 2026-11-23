@@ -30,7 +30,11 @@ from deltalake._internal import (
     TableFeatures,
 )
 from deltalake._internal import create_deltalake as _create_deltalake
-from deltalake._util import deprecate_positional_commit_args, encode_partition_value
+from deltalake._util import (
+    deprecate_positional_commit_args,
+    deprecate_uc_uri,
+    encode_partition_value,
+)
 from deltalake.exceptions import DeltaProtocolError
 from deltalake.schema import Field as DeltaField
 from deltalake.schema import Schema as DeltaSchema
@@ -47,6 +51,7 @@ if TYPE_CHECKING:
         ParquetReadOptions,
     )
 
+    from deltalake.catalog import UnityCatalog
     from deltalake.transaction import (
         AddAction,
         CommitProperties,
@@ -414,12 +419,56 @@ class DeltaTable:
                 stacklevel=2,
             )
 
+        deprecate_uc_uri(table_uri)
+
         self._storage_options = storage_options
         self._table = RawDeltaTable(
             str(table_uri),
             version=version,
             storage_options=storage_options,
         )
+
+    @classmethod
+    def from_catalog(
+        cls,
+        catalog: UnityCatalog,
+        name: str,
+        version: int | None = None,
+        storage_options: dict[str, str] | None = None,
+    ) -> DeltaTable:
+        """
+        Open a table that a catalog has, by the name of the table.
+
+        The catalog gives the storage location of the table and temporary credentials for
+        that location. A table with catalog-managed commits commits through the catalog.
+
+        Args:
+            catalog: the catalog that has the table
+            name: the name of the table in the catalog: `catalog.schema.table`
+            version: version of the DeltaTable
+            storage_options: a dictionary of the options to use for the storage backend,
+                in addition to the credentials that the catalog gives
+
+        Example:
+            ```python
+            from deltalake import DeltaTable, UnityCatalog
+
+            catalog = UnityCatalog(
+                "https://adb-1234567890.XX.azuredatabricks.net",
+                token="<access-token>",
+            )
+            dt = DeltaTable.from_catalog(catalog, "my_catalog.my_schema.my_table")
+            ```
+        """
+        table = cls.__new__(cls)
+        table._storage_options = storage_options
+        table._table = RawDeltaTable.from_catalog(
+            catalog._catalog,
+            name,
+            version=version,
+            storage_options=storage_options,
+        )
+        return table
 
     @property
     def table_config(self) -> DeltaTableConfig:
@@ -445,6 +494,7 @@ class DeltaTable:
             storage_options: a dictionary of the options to use for the
                 storage backend
         """
+        deprecate_uc_uri(table_uri)
         return RawDeltaTable.is_deltatable(str(table_uri), storage_options)
 
     @classmethod

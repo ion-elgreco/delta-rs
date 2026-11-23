@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
@@ -78,6 +78,13 @@ class CommitInfoIterator:
     def __iter__(self) -> CommitInfoIterator: ...
     def __next__(self) -> str: ...
 
+class RawUnityCatalog:
+    def __init__(
+        self,
+        workspace_url: str,
+        token: str | Callable[[], str] | None = None,
+    ) -> None: ...
+
 class RawDeltaTable:
     schema: Any
 
@@ -88,13 +95,12 @@ class RawDeltaTable:
         storage_options: dict[str, str] | None,
     ) -> None: ...
     @staticmethod
-    def get_table_uri_from_data_catalog(
-        data_catalog: str,
-        database_name: str,
-        table_name: str,
-        data_catalog_id: str | None = None,
-        catalog_options: dict[str, str] | None = None,
-    ) -> str: ...
+    def from_catalog(
+        catalog: RawUnityCatalog,
+        name: str,
+        version: int | None = None,
+        storage_options: dict[str, str] | None = None,
+    ) -> RawDeltaTable: ...
     @staticmethod
     def is_deltatable(
         table_uri: str, storage_options: dict[str, str] | None

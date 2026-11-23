@@ -208,7 +208,65 @@ version number or datetime string:
 
 ## Load table from Unity Catalog
 
-You may load a Delta Table from your Databricks or Open Source Unity Catalog using a `uc://` URL of format `uc://<catalog-name>.<db-name>.<table-name>`. Example as follows:
+You can load a Delta table from your Databricks or Open Source Unity Catalog by its name in the catalog, `<catalog-name>.<schema-name>.<table-name>`. The catalog gives the storage location of the table and temporary credentials for that location. A table with catalog-managed commits commits through the catalog.
+
+=== "Python"
+
+    ```python
+    from deltalake import DeltaTable, UnityCatalog
+
+    catalog = UnityCatalog(
+        "https://adb-1234567890.XX.azuredatabricks.net",
+        token="<unity-catalog-access-token-here>",
+    )
+    dt = DeltaTable.from_catalog(catalog, "unity.my_database.my_table")
+    ```
+
+=== "Rust"
+
+    ```rust
+    use deltalake::logstore::StorageConfig;
+    use deltalake::unity_catalog::UnityCatalogBuilder;
+    use deltalake::{DeltaTable, TableCatalog};
+
+    // The workspace URL and the credentials come from the environment variables.
+    let catalog = UnityCatalogBuilder::from_env().build()?;
+    let log_store = catalog
+        .log_store("unity.my_database.my_table", StorageConfig::default())
+        .await?;
+    let mut table = DeltaTable::new(log_store);
+    table.load().await?;
+    ```
+
+### Access token that expires
+
+The `token` can be a callable without arguments that returns the access token, such as a token provider of your identity library. The catalog calls it before each request that it sends, also when a table commits through the catalog. So the callable must keep its token and get a new one before the token expires.
+
+=== "Python"
+
+    ```python
+    from deltalake import DeltaTable, UnityCatalog
+
+    def access_token() -> str:
+        # The token of your identity provider, a new one when the last is about to expire.
+        return current_token()
+
+    catalog = UnityCatalog(
+        "https://adb-1234567890.XX.azuredatabricks.net",
+        token=access_token,
+    )
+    dt = DeltaTable.from_catalog(catalog, "unity.my_database.my_table")
+    ```
+
+The storage credentials that the catalog gives when the table opens do not change. Open the table again when they expire.
+
+### `uc://` URL (deprecated)
+
+!!! warning
+
+    A `uc://` URL is deprecated and gives a `DeprecationWarning`. Use `DeltaTable.from_catalog` instead.
+
+A `uc://` URL of format `uc://<catalog-name>.<db-name>.<table-name>` also loads a table from Unity Catalog. Example as follows:
 
 === "Python"
 
@@ -245,7 +303,7 @@ You may load a Delta Table from your Databricks or Open Source Unity Catalog usi
 
 ### Environment variables
 
-The following environment variables are supported when loading tables using a `uc://` URL:
+The Unity Catalog client reads the following environment variables. The arguments of `UnityCatalog` take precedence.
 
 #### Connection Configuration
 

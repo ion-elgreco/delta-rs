@@ -1,3 +1,4 @@
+mod catalog;
 mod datafusion;
 mod error;
 mod features;
@@ -46,7 +47,7 @@ use deltalake::kernel::{
     Transaction, Version,
 };
 use deltalake::logstore::LogStoreRef;
-use deltalake::logstore::{IORuntime, ObjectStoreRef};
+use deltalake::logstore::{IORuntime, ObjectStoreRef, StorageConfig};
 use deltalake::operations::convert_to_delta::{ConvertToDeltaBuilder, PartitionStrategy};
 use deltalake::operations::optimize::OptimizeType;
 use deltalake::operations::update_table_metadata::TableMetadataUpdate;
@@ -63,7 +64,7 @@ use deltalake::protocol::log_compaction::compact_logs;
 use deltalake::protocol::{DeltaOperation, SaveMode};
 use deltalake::table::config::TablePropertiesExt as _;
 use deltalake::table::state::DeltaTableState;
-use deltalake::{DeltaResult, DeltaTable, DeltaTableBuilder, init_client_version};
+use deltalake::{DeltaResult, DeltaTable, DeltaTableBuilder, TableCatalog, init_client_version};
 use futures::TryStreamExt;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::pybacked::PyBackedStr;
@@ -85,6 +86,7 @@ use std::time;
 
 use writer::maybe_lazy_cast_reader;
 
+use crate::catalog::RawUnityCatalog;
 use crate::datafusion::TokioDeltaScan;
 use crate::error::{DeltaProtocolError, PythonError, to_rt_err};
 use crate::features::TableFeatures;
@@ -456,6 +458,43 @@ impl RawDeltaTable {
             }
 
             let table = rt().block_on(builder.load()).map_err(PythonError::from)?;
+            Ok(RawDeltaTable {
+                _config: FsConfig {
+                    root_url: table.table_url().clone(),
+                    options,
+                },
+                _table: Arc::new(Mutex::new(table)),
+            })
+        })
+    }
+
+    /// Open the table that `catalog` has with the name `name`.
+    #[staticmethod]
+    #[pyo3(signature = (catalog, name, version = None, storage_options = None))]
+    fn from_catalog(
+        py: Python,
+        catalog: &RawUnityCatalog,
+        name: &str,
+        version: Option<Version>,
+        storage_options: Option<HashMap<String, String>>,
+    ) -> PyResult<Self> {
+        // A token callable needs the GIL when the catalog client asks it for the token.
+        py.detach(|| {
+            let options = storage_options.unwrap_or_default();
+            let storage_config = StorageConfig::parse_options(options.clone())
+                .map_err(PythonError::from)?
+                .with_io_runtime(IORuntime::default());
+            let table = rt()
+                .block_on(async {
+                    let log_store = catalog.inner.log_store(name, storage_config).await?;
+                    let mut table = DeltaTable::new(log_store);
+                    match version {
+                        Some(version) => table.load_version(version).await?,
+                        None => table.load().await?,
+                    }
+                    Ok::<_, DeltaTableError>(table)
+                })
+                .map_err(PythonError::from)?;
             Ok(RawDeltaTable {
                 _config: FsConfig {
                     root_url: table.table_url().clone(),
@@ -3364,6 +3403,7 @@ fn _internal(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(pyo3::wrap_pyfunction!(write_to_deltalake, m)?)?;
     m.add_function(pyo3::wrap_pyfunction!(convert_to_deltalake, m)?)?;
     m.add_class::<RawDeltaTable>()?;
+    m.add_class::<RawUnityCatalog>()?;
     m.add_class::<CommitInfoIterator>()?;
     m.add_class::<PyMergeBuilder>()?;
     m.add_class::<PyQueryBuilder>()?;

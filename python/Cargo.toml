@@ -19,7 +19,7 @@ doc = false
 
 [package.metadata.cargo-machete]
 # cc is a resolution-only pin (see the workspace Cargo.toml), not used in code
-ignored = ["deltalake-catalog-unity", "cc"]
+ignored = ["cc"]
 
 [dependencies]
 delta_kernel.workspace = true
