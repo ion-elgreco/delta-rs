@@ -1,7 +1,9 @@
 //! Glue Data Catalog.
 //!
 use aws_config::{BehaviorVersion, SdkConfig};
-use deltalake_core::data_catalog::{DataCatalog, DataCatalogError};
+use deltalake_core::data_catalog::{DataCatalogError, TableCatalog};
+use deltalake_core::logstore::{LogStoreRef, StorageConfig, logstore_for};
+use deltalake_core::{DeltaResult, DeltaTableError, ensure_table_uri};
 
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -30,7 +32,7 @@ impl From<GlueError> for DataCatalogError {
     }
 }
 
-/// A Glue Data Catalog implement of the `Catalog` trait
+/// The Glue Data Catalog, as a [`TableCatalog`]
 pub struct GlueDataCatalog {
     client: aws_sdk_glue::Client,
 }
@@ -48,23 +50,9 @@ impl GlueDataCatalog {
         let client = aws_sdk_glue::Client::new(config);
         Self { client }
     }
-}
-
-impl std::fmt::Debug for GlueDataCatalog {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(fmt, "GlueDataCatalog")
-    }
-}
-
-// Placeholder suffix created by Spark in the Glue Data Catalog Location
-const PLACEHOLDER_SUFFIX: &str = "-__PLACEHOLDER__";
-
-#[async_trait::async_trait]
-impl DataCatalog for GlueDataCatalog {
-    type Error = DataCatalogError;
 
     /// Get the table storage location from the Glue Data Catalog
-    async fn get_table_storage_location(
+    pub async fn get_table_storage_location(
         &self,
         catalog_id: Option<String>,
         database_name: &str,
@@ -113,5 +101,43 @@ impl DataCatalog for GlueDataCatalog {
             }
             Err(err) => Err(err.into()),
         }
+    }
+}
+
+impl std::fmt::Debug for GlueDataCatalog {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(fmt, "GlueDataCatalog")
+    }
+}
+
+// Placeholder suffix created by Spark in the Glue Data Catalog Location
+const PLACEHOLDER_SUFFIX: &str = "-__PLACEHOLDER__";
+
+#[async_trait::async_trait]
+impl TableCatalog for GlueDataCatalog {
+    /// The log store for the storage location of the table `name`: `database.table`, or
+    /// `catalog_id.database.table` for a table of another account.
+    ///
+    /// The storage backend of that location must be registered, for example with
+    /// `deltalake_aws::register_handlers`.
+    async fn log_store(
+        &self,
+        name: &str,
+        storage_config: StorageConfig,
+    ) -> DeltaResult<LogStoreRef> {
+        let mut parts = name.rsplitn(3, '.');
+        let (Some(table), Some(database), catalog_id) = (parts.next(), parts.next(), parts.next())
+        else {
+            return Err(DeltaTableError::Generic(format!(
+                "a Glue table name is `database.table`, got `{name}`"
+            )));
+        };
+        let location = self
+            .get_table_storage_location(catalog_id.map(str::to_string), database, table)
+            .await
+            .map_err(|source| DeltaTableError::GenericError {
+                source: Box::new(source),
+            })?;
+        logstore_for(&ensure_table_uri(location)?, storage_config)
     }
 }

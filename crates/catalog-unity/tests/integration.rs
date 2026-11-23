@@ -6,11 +6,14 @@
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use deltalake_catalog_unity::models::*;
-use deltalake_catalog_unity::{UnityCatalog, UnityCatalogBuilder};
-use deltalake_core::{DataCatalog, DeltaTable, DeltaTableBuilder};
+use deltalake_catalog_unity::{TokenFuture, TokenProvider, UnityCatalog, UnityCatalogBuilder};
+use deltalake_core::logstore::StorageConfig;
+use deltalake_core::{DeltaTable, DeltaTableBuilder, TableCatalog};
 use deltalake_test::utils::TestTables;
 use reqwest::Url;
 use serde_json::{Value, json};
@@ -232,11 +235,89 @@ async fn read_table_on_local_file_system() {
     assert_eq!(table.get_file_uris().unwrap().count(), 5);
 }
 
+/// Opens `name` through the catalog.
+async fn open_table(catalog: &UnityCatalog, name: &str) -> DeltaTable {
+    let log_store = catalog
+        .log_store(
+            &format!("{CATALOG}.{SCHEMA}.{name}"),
+            StorageConfig::default(),
+        )
+        .await
+        .unwrap();
+    let mut table = DeltaTable::new(log_store);
+    table.load().await.unwrap();
+    table
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_catalog_opens_a_table() {
+    let server = UnityCatalogServer::start().await;
+    let location = server
+        .register_table("partitioned", TestTables::Delta0_8_0Partitioned)
+        .await;
+    server.register_table("simple", TestTables::Simple).await;
+    let catalog = server.client();
+
+    // The table has the storage location that the catalog gives.
+    let table = open_table(&catalog, "partitioned").await;
+    assert_eq!(table.version(), Some(0));
+    assert_eq!(table.get_file_uris().unwrap().count(), 6);
+    assert_eq!(
+        table.log_store().root_url().as_str().trim_end_matches('/'),
+        location.trim_end_matches('/')
+    );
+
+    let table = open_table(&catalog, "simple").await;
+    assert_eq!(table.version(), Some(4));
+    assert_eq!(table.get_file_uris().unwrap().count(), 5);
+
+    let error = catalog
+        .log_store("unity.default", StorageConfig::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("`catalog.schema.table`"));
+
+    let error = catalog
+        .log_store("unity.default.missing", StorageConfig::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("missing"), "{error}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn table_catalog_asks_the_token_provider_for_each_request() {
+    #[derive(Default)]
+    struct CountedToken(AtomicUsize);
+
+    impl TokenProvider for CountedToken {
+        fn token(&self) -> TokenFuture<'_> {
+            let call = self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(format!("token-{call}")) })
+        }
+    }
+
+    let server = UnityCatalogServer::start().await;
+    server.register_table("simple", TestTables::Simple).await;
+    let tokens = Arc::new(CountedToken::default());
+    let catalog = UnityCatalogBuilder::from_env()
+        .try_with_option("unity_workspace_url", &server.url)
+        .unwrap()
+        .with_token_provider(tokens.clone())
+        .build()
+        .unwrap();
+
+    // One request for the table and one for its credentials.
+    let table = open_table(&catalog, "simple").await;
+    assert_eq!(table.version(), Some(4));
+    assert_eq!(tokens.0.load(Ordering::SeqCst), 2);
+
+    open_table(&catalog, "simple").await;
+    assert_eq!(tokens.0.load(Ordering::SeqCst), 4);
+}
+
 #[cfg(feature = "datafusion")]
 #[tokio::test(flavor = "multi_thread")]
 async fn datafusion_catalog() {
-    use std::sync::Arc;
-
     use datafusion::catalog::CatalogProvider;
     use datafusion::common::TableReference;
     use datafusion::prelude::SessionContext;

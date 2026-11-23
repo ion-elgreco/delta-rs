@@ -1,5 +1,4 @@
 use deltalake_catalog_glue::*;
-use deltalake_core::*;
 
 #[tokio::main]
 async fn main() {

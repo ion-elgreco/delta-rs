@@ -109,7 +109,7 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use url::Url;
 
-pub use self::data_catalog::{DataCatalog, DataCatalogError};
+pub use self::data_catalog::{DataCatalogError, TableCatalog};
 pub use self::errors::*;
 pub use self::schema::partitions::*;
 pub use self::schema::*;

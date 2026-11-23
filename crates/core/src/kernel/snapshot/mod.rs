@@ -282,9 +282,8 @@ impl Snapshot {
         if !log_store.is_catalog_managed() && snapshot.table_configuration().is_catalog_managed() {
             return Err(DeltaTableError::Generic(
                 "table requires catalog-managed (coordinated) commits but was opened without a \
-                 catalog coordinator; open it through its catalog with catalog-managed commits \
-                 enabled (for Unity Catalog: `uc://catalog.schema.table` with \
-                 `catalog_managed=true`)"
+                 catalog coordinator; open it through its catalog (for Unity Catalog: the log \
+                 store of `TableCatalog::log_store` for `catalog.schema.table`)"
                     .to_string(),
             ));
         }

@@ -174,3 +174,9 @@ inherits = "release"
 opt-level = 3
 codegen-units = 1
 lto = "thin"
+
+[patch.crates-io]
+# The UC REST clients of kernel with a token provider (buoyant kernel 0.30.1 + one commit), for
+# an access token that changes while a table is open. Back to crates.io when a release has it.
+unity-catalog-delta-client-api = { git = "https://github.com/ion-elgreco/delta-kernel-rs", rev = "59bad85036c94b166291d2fec1c56b75b869c65b" }
+unity-catalog-delta-rest-client = { git = "https://github.com/ion-elgreco/delta-kernel-rs", rev = "59bad85036c94b166291d2fec1c56b75b869c65b" }

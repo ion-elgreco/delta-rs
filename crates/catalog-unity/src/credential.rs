@@ -1,6 +1,7 @@
 //! Authorization credentials
 
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, HeaderValue};
@@ -8,6 +9,7 @@ use reqwest::{Method, Response};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use unity_catalog_delta_rest_client::{TokenFuture, TokenProvider};
 
 use super::UnityCatalogError;
 use crate::client::token::{TemporaryToken, TokenCache};
@@ -51,6 +53,61 @@ pub enum CredentialProvider {
 
     /// a credential to fetch expiring auth tokens
     TokenCredential(TokenCache<String>, Box<dyn TokenCredential>),
+}
+
+impl CredentialProvider {
+    /// The token to send now. The token of a credential is kept until it is about to expire.
+    pub(crate) async fn token(
+        &self,
+        client: &ClientWithMiddleware,
+    ) -> Result<String, UnityCatalogError> {
+        match self {
+            CredentialProvider::BearerToken(token) => Ok(token.clone()),
+            CredentialProvider::TokenCredential(cache, cred) => {
+                cache.get_or_insert_with(|| cred.fetch_token(client)).await
+            }
+        }
+    }
+}
+
+/// Gives the clients of kernel the token of a credential, for each request that they send.
+pub(crate) struct CredentialToken {
+    pub(crate) credential: Arc<CredentialProvider>,
+    pub(crate) client: ClientWithMiddleware,
+}
+
+impl TokenProvider for CredentialToken {
+    fn token(&self) -> TokenFuture<'_> {
+        Box::pin(async move { Ok(self.credential.token(&self.client).await?) })
+    }
+}
+
+/// The token of a [`TokenProvider`] that the caller gives.
+pub(crate) struct ProvidedToken(pub(crate) Arc<dyn TokenProvider>);
+
+impl std::fmt::Debug for ProvidedToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProvidedToken")
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenCredential for ProvidedToken {
+    async fn fetch_token(
+        &self,
+        _client: &ClientWithMiddleware,
+    ) -> Result<TemporaryToken<String>, UnityCatalogError> {
+        let token = self
+            .0
+            .token()
+            .await
+            .map_err(|source| UnityCatalogError::Generic { source })?;
+        Ok(TemporaryToken {
+            token,
+            // The provider keeps its token, so each request asks it again.
+            expiry: Some(Instant::now()),
+        })
+    }
 }
 
 #[derive(Deserialize, Debug)]

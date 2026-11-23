@@ -2,6 +2,9 @@
 
 use std::fmt::Debug;
 
+use crate::DeltaResult;
+use crate::logstore::{LogStoreRef, StorageConfig};
+
 #[cfg(feature = "datafusion")]
 pub mod storage;
 
@@ -46,17 +49,26 @@ pub enum DataCatalogError {
     },
 }
 
-/// Abstractions for data catalog for the Delta table. To add support for new cloud, simply implement this trait.
+/// A catalog that opens the Delta tables that it knows by name.
+///
+/// The catalog gives the [`LogStore`](crate::logstore::LogStore) of a table: the location of the
+/// table, an object store with the access that the catalog grants, and the commit rules of the
+/// catalog. A table opens from that log store:
+///
+/// ```ignore
+/// let log_store = catalog.log_store("main.sales.orders", StorageConfig::default()).await?;
+/// let mut table = DeltaTable::new(log_store);
+/// table.load().await?;
+/// ```
 #[async_trait::async_trait]
-pub trait DataCatalog: Send + Sync + Debug {
-    /// Error type returned by catalog operations.
-    type Error;
-
-    /// Get the table storage location from the Data Catalog
-    async fn get_table_storage_location(
+pub trait TableCatalog: Send + Sync + Debug {
+    /// The log store of the table `name`, a dotted name such as `catalog.schema.table`.
+    ///
+    /// `storage_config` has the settings of the object store that the catalog does not give,
+    /// such as timeouts and the IO runtime.
+    async fn log_store(
         &self,
-        catalog_id: Option<String>,
-        database_name: &str,
-        table_name: &str,
-    ) -> Result<String, Self::Error>;
+        name: &str,
+        storage_config: StorageConfig,
+    ) -> DeltaResult<LogStoreRef>;
 }
