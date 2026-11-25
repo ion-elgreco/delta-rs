@@ -5,7 +5,8 @@
 //! and also sends it to an aggregation. The aggregation computes the values for the placeholders
 //! of the early filter: the distinct values of the source columns that the join condition matches
 //! with partition columns, and the minimum and maximum of the source columns that it matches with
-//! other columns. When the source ends, [`SourceStatsExec`] builds the early filter and sets its
+//! other columns. For those other columns, it also collects their distinct values, up to a limit,
+//! for an IN list. When the source ends, [`SourceStatsExec`] builds the early filter and sets its
 //! file skipping predicates in the [`RuntimeFileFilter`] of the target scan. Only then does it
 //! report the end of the source.
 //!
@@ -85,6 +86,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use parking_lot::Mutex;
 use tracing::warn;
 
+use super::distinct_values::InListLimits;
 use super::filter::{StreamingEarlyFilter, filter_from_placeholder_values};
 use super::{build_file_skipping_predicates, normalize_target_subset_filter};
 use crate::DeltaResult;
@@ -101,6 +103,8 @@ pub(crate) struct SourceStatsCollector {
     not_match_source_filter: Option<Expr>,
     /// Aggregates the placeholder values from the source batches
     aggregate: Arc<dyn ExecutionPlan>,
+    /// The limits of the IN lists of the early filter
+    in_list_limits: Option<InListLimits>,
     state: Mutex<CollectState>,
     source_rows: AtomicUsize,
     target_schema: DFSchemaRef,
@@ -129,6 +133,7 @@ impl SourceStatsCollector {
             filter: filter.filter,
             not_match_source_filter,
             aggregate: filter.aggregate,
+            in_list_limits: filter.in_list_limits,
             state: Mutex::new(CollectState {
                 batch_sender: Some(filter.batch_sender),
                 aggregation: None,
@@ -194,12 +199,12 @@ impl SourceStatsCollector {
             Some(self.not_match_source_filter.clone().unwrap_or(lit(false)))
         } else {
             let items = concat_batches(&self.aggregate.schema(), &batches)?;
-            filter_from_placeholder_values(&self.filter, &items)?.map(|filter| {
-                match &self.not_match_source_filter {
+            filter_from_placeholder_values(&self.filter, &items, self.in_list_limits)?.map(
+                |filter| match &self.not_match_source_filter {
                     Some(not_match_source_filter) => filter.or(not_match_source_filter.clone()),
                     None => filter,
-                }
-            })
+                },
+            )
         };
         let Some(filter) = filter else {
             return Ok(());

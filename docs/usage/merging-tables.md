@@ -715,6 +715,8 @@ When your table is partitioned, including partition columns in your merge predic
 
 As you can see, your filter should specify the partition column(s) and the value(s) you want to target during the merge operation.
 The `merge` method also derives a pruning predicate from the source data: the partition values and the minimum and maximum of the join keys.
+When a join key has few distinct values in the source, at most 150 values and 128 KiB, the predicate also includes these values.
+The merge then reads only the files that can contain them, not all the files between the minimum and the maximum.
 With the default argument `streamed_exec=True`, the source is read only once, and this predicate is built while the source is read.
 It then skips the target files that cannot match before they are read.
 Explicit predicates in your merge condition prune files before the merge starts, so they still help, for example when the source covers a wide range of keys.

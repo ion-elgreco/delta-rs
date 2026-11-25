@@ -2,19 +2,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::Array as _;
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use datafusion::catalog::Session;
 use datafusion::catalog::streaming::StreamingTable;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::common::{ScalarValue, TableReference, exec_err};
+use datafusion::common::{Result as DataFusionResult, ScalarValue, TableReference, exec_err};
 use datafusion::datasource::provider_as_source;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::functions_aggregate::expr_fn::{max, min};
 use datafusion::logical_expr::expr::{InList, Placeholder};
 use datafusion::logical_expr::{
-    Aggregate, Between, BinaryExpr, Expr, LogicalPlan, LogicalPlanBuilder, Operator, lit,
+    Aggregate, AggregateUDF, Between, BinaryExpr, Expr, LogicalPlan, LogicalPlanBuilder, Operator,
+    lit,
 };
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -25,6 +27,7 @@ use futures::{StreamExt as _, TryStreamExt as _};
 use itertools::Itertools;
 use parking_lot::Mutex;
 
+use super::distinct_values::InListLimits;
 use crate::kernel::EagerSnapshot;
 use crate::{DeltaResult, DeltaTableError};
 
@@ -76,6 +79,7 @@ fn construct_placeholder(
     is_partition_column: bool,
     column_name: String,
     placeholders: &mut Vec<PredicatePlaceholder>,
+    distinct_values: Option<&AggregateUDF>,
 ) -> Option<Expr> {
     if is_partition_column {
         let placeholder_name = format!("{column_name}_{}", placeholders.len());
@@ -116,13 +120,14 @@ fn construct_placeholder(
                     id: name_max.clone(),
                     field: None,
                 });
+                let name_values = format!("{column_name}_{}_values", placeholders.len());
                 let (source_expr, target_expr) = if source_left {
                     (*binary.left, *binary.right)
                 } else {
                     (*binary.right, *binary.left)
                 };
                 let replaced = Expr::Between(Between {
-                    expr: target_expr.into(),
+                    expr: target_expr.clone().into(),
                     negated: false,
                     low: placeholder_min.into(),
                     high: placeholder_max.into(),
@@ -134,19 +139,45 @@ fn construct_placeholder(
                     is_aggregate: true,
                 });
                 placeholders.push(PredicatePlaceholder {
-                    expr: max(source_expr),
+                    expr: max(source_expr.clone()),
                     alias: name_max,
                     is_aggregate: true,
                 });
-                Some(replaced)
+                let Some(distinct_values) = distinct_values else {
+                    return Some(replaced);
+                };
+                placeholders.push(PredicatePlaceholder {
+                    expr: distinct_values.call(vec![source_expr]),
+                    alias: name_values.clone(),
+                    is_aggregate: true,
+                });
+                // An IN list of the source values, see `replace_placeholders`
+                let placeholder_values = Expr::Placeholder(Placeholder {
+                    id: name_values,
+                    field: None,
+                });
+                Some(replaced.and(target_expr.in_list(vec![placeholder_values], false)))
             }
             _ => None,
         }
     }
 }
 
-fn replace_placeholders(expr: Expr, placeholders: &HashMap<String, ScalarValue>) -> Expr {
-    expr.transform(&|expr| match expr {
+fn replace_placeholders(
+    expr: Expr,
+    placeholders: &HashMap<String, ScalarValue>,
+) -> DataFusionResult<Expr> {
+    // Top down, so an IN list is replaced before its placeholder.
+    expr.transform_down(|expr| match expr {
+        Expr::InList(in_list) => Ok(match source_values(&in_list.list, placeholders)? {
+            Some(list) if list.len() < 2 => {
+                // Too many values for an IN list, or fewer than two: only the range of the
+                // values skips files. The range of one value is the same filter as its IN list.
+                Transformed::yes(lit(true))
+            }
+            Some(list) => Transformed::yes(Expr::InList(InList { list, ..in_list })),
+            None => Transformed::no(Expr::InList(in_list)),
+        }),
         Expr::Placeholder(Placeholder { id, .. }) => {
             let value = placeholders[&id].clone();
             // Replace the placeholder with the value
@@ -154,8 +185,30 @@ fn replace_placeholders(expr: Expr, placeholders: &HashMap<String, ScalarValue>)
         }
         _ => Ok(Transformed::no(expr)),
     })
-    .unwrap()
-    .data
+    .map(|transformed| transformed.data)
+}
+
+/// The items of the IN list `list`, when it is the placeholder of the distinct values of a source
+/// column. The items are empty when the values were too many for an IN list, or when there are
+/// none. Returns `None` for other lists.
+fn source_values(
+    list: &[Expr],
+    placeholders: &HashMap<String, ScalarValue>,
+) -> DataFusionResult<Option<Vec<Expr>>> {
+    let [Expr::Placeholder(Placeholder { id, .. })] = list else {
+        return Ok(None);
+    };
+    let Some(ScalarValue::List(values)) = placeholders.get(id) else {
+        return Ok(None);
+    };
+    if values.is_null(0) {
+        return Ok(Some(vec![]));
+    }
+    let values = values.value(0);
+    (0..values.len())
+        .map(|i| ScalarValue::try_from_array(&values, i).map(lit))
+        .collect::<DataFusionResult<_>>()
+        .map(Some)
 }
 
 pub(crate) struct PredicatePlaceholder {
@@ -171,7 +224,9 @@ pub(crate) struct PredicatePlaceholder {
 ///    columns
 ///
 /// 2. for any is equal relations between a source column and a non-partition target column,
-///    replace source with is between expression with min(source_column) and max(source_column) placeholders
+///    replace source with is between expression with min(source_column) and max(source_column) placeholders.
+///    With `distinct_values`, also add an IN list with a placeholder for the distinct values of
+///    the source column. When the values are too many for an IN list, only the range remains.
 ///
 /// 3. for any other relation with a source column, remove them.
 ///
@@ -183,6 +238,10 @@ pub(crate) struct PredicatePlaceholder {
 ///
 /// `$date_0 = target.date and target.id between $id_1_min and $id_1_max and frob > 42`
 ///
+/// or with `distinct_values`:
+///
+/// `$date_0 = target.date and target.id between $id_1_min and $id_1_max and target.id in ($id_1_values) and frob > 42`
+///
 /// This leaves us with a predicate that we can push into delta scan after expanding it out to
 /// a conjunction between the distinct partitions in the source input.
 ///
@@ -193,6 +252,7 @@ pub(crate) fn generalize_filter(
     target_name: &TableReference,
     placeholders: &mut Vec<PredicatePlaceholder>,
     with_placeholders: bool,
+    distinct_values: Option<&AggregateUDF>,
 ) -> Option<Expr> {
     match predicate {
         Expr::BinaryExpr(binary) => {
@@ -207,6 +267,7 @@ pub(crate) fn generalize_filter(
                             partition_columns.contains(&left_target),
                             left_target,
                             placeholders,
+                            distinct_values,
                         );
                     }
                     return None;
@@ -221,6 +282,7 @@ pub(crate) fn generalize_filter(
                             partition_columns.contains(&right_target),
                             right_target,
                             placeholders,
+                            distinct_values,
                         );
                     }
                     return None;
@@ -234,6 +296,7 @@ pub(crate) fn generalize_filter(
                 target_name,
                 placeholders,
                 with_placeholders,
+                distinct_values,
             );
             let right = generalize_filter(
                 *binary.right,
@@ -242,6 +305,7 @@ pub(crate) fn generalize_filter(
                 target_name,
                 placeholders,
                 with_placeholders,
+                distinct_values,
             );
 
             match (left, right) {
@@ -274,6 +338,7 @@ pub(crate) fn generalize_filter(
                 target_name,
                 placeholders,
                 with_placeholders,
+                distinct_values,
             )?;
 
             let mut list_expr = Vec::new();
@@ -289,6 +354,7 @@ pub(crate) fn generalize_filter(
                             target_name,
                             placeholders,
                             with_placeholders,
+                            distinct_values,
                         ) {
                             list_expr.push(item)
                         }
@@ -345,6 +411,8 @@ pub(crate) async fn try_construct_early_filter(
     let partition_columns = table_metadata.partition_columns();
 
     let mut placeholders = Vec::default();
+    let in_list_limits = InListLimits::from_session(session_state);
+    let distinct_values = in_list_limits.map(InListLimits::distinct_values);
 
     match generalize_filter(
         join_predicate,
@@ -353,6 +421,7 @@ pub(crate) async fn try_construct_early_filter(
         target_name,
         &mut placeholders,
         !streaming_source,
+        distinct_values.as_ref(),
     ) {
         None => Ok(None),
         Some(filter) => {
@@ -364,7 +433,7 @@ pub(crate) async fn try_construct_early_filter(
                 let aggregate = placeholder_aggregate(source.clone(), placeholders)?;
                 let execution_plan = session_state.create_physical_plan(&aggregate).await?;
                 let items = execute_plan_to_batch(session_state, execution_plan).await?;
-                filter_from_placeholder_values(&filter, &items)
+                filter_from_placeholder_values(&filter, &items, in_list_limits)
             }
         }
     }
@@ -374,6 +443,7 @@ pub(crate) async fn try_construct_early_filter(
 ///
 /// We aggregate the distinct values for partitions with the group_columns and stats(min, max) for dynamic filter as agg_columns
 /// Can be translated into `SELECT partition1 as part1_0, min(id) as id_1_min, max(id) as id_1_max FROM source GROUP BY partition1`
+/// With IN lists, `distinct_values(id) as id_1_values` is also aggregated, see [`generalize_filter`].
 fn placeholder_aggregate(
     source: LogicalPlan,
     placeholders: Vec<PredicatePlaceholder>,
@@ -394,10 +464,18 @@ fn placeholder_aggregate(
 
 /// Replace the placeholders of `filter` with the values of each row of `items`, and combine the
 /// rows with `OR`. Returns `None` when `items` has no rows.
+///
+/// `in_list_limits` are the limits of the IN lists of distinct source values, which apply to all
+/// rows together.
 pub(crate) fn filter_from_placeholder_values(
     filter: &Expr,
     items: &RecordBatch,
+    in_list_limits: Option<InListLimits>,
 ) -> DeltaResult<Option<Expr>> {
+    let items = match in_list_limits {
+        Some(limits) => limits.limit_lists(items)?,
+        None => items.clone(),
+    };
     let placeholder_names = items
         .schema()
         .fields()
@@ -414,7 +492,7 @@ pub(crate) fn filter_from_placeholder_values(
                     Ok((placeholder.clone(), value))
                 })
                 .try_collect::<_, _, DeltaTableError>()?;
-            Ok(replace_placeholders(filter.clone(), &replacements))
+            Ok(replace_placeholders(filter.clone(), &replacements)?)
         })
         .collect::<DeltaResult<Vec<_>>>()?;
     Ok(disjunction(terms))
@@ -457,6 +535,8 @@ pub(crate) struct StreamingEarlyFilter {
     /// Aggregates the placeholder values from the batches sent to `batch_sender`
     pub aggregate: Arc<dyn ExecutionPlan>,
     pub batch_sender: mpsc::Sender<RecordBatch>,
+    /// The limits of the IN lists of the filter, see [`filter_from_placeholder_values`]
+    pub in_list_limits: Option<InListLimits>,
 }
 
 /// Plan the early filter for a source that can only be read once.
@@ -474,6 +554,8 @@ pub(crate) async fn try_construct_streaming_early_filter(
 ) -> DeltaResult<Option<StreamingEarlyFilter>> {
     let partition_columns = table_snapshot.metadata().partition_columns();
     let mut placeholders = Vec::default();
+    let in_list_limits = InListLimits::from_session(session_state);
+    let distinct_values = in_list_limits.map(InListLimits::distinct_values);
     let Some(filter) = generalize_filter(
         join_predicate,
         &partition_columns.to_vec(),
@@ -481,6 +563,7 @@ pub(crate) async fn try_construct_streaming_early_filter(
         target_name,
         &mut placeholders,
         true,
+        distinct_values.as_ref(),
     ) else {
         return Ok(None);
     };
@@ -509,6 +592,7 @@ pub(crate) async fn try_construct_streaming_early_filter(
         filter,
         aggregate,
         batch_sender,
+        in_list_limits,
     }))
 }
 
@@ -724,7 +808,12 @@ mod tests {
 
         assert!(pred.is_some());
 
-        let filter = col(Column::new(Some(target_name.clone()), "id")).between(lit("B"), lit("C"));
+        let filter = col(Column::new(Some(target_name.clone()), "id"))
+            .between(lit("B"), lit("C"))
+            .and(
+                col(Column::new(Some(target_name.clone()), "id"))
+                    .in_list(vec![lit("B"), lit("C")], false),
+            );
         assert_eq!(pred.unwrap(), filter);
     }
 
@@ -784,6 +873,10 @@ mod tests {
 
         let filter = col(Column::new(Some(target_name.clone()), "id"))
             .between(lit("B"), lit("C"))
+            .and(
+                col(Column::new(Some(target_name.clone()), "id"))
+                    .in_list(vec![lit("B"), lit("C")], false),
+            )
             .and(lit("2023-07-04").eq(col(Column::new(Some(target_name.clone()), "modified"))));
         assert_eq!(pred.unwrap(), filter);
     }
@@ -847,6 +940,10 @@ mod tests {
 
         let filter = col(Column::new(Some(target_name.clone()), "id"))
             .between(lit("A"), lit("C"))
+            .and(
+                col(Column::new(Some(target_name.clone()), "id"))
+                    .in_list(vec![lit("A"), lit("B"), lit("C")], false),
+            )
             .and(col(Column::new_unqualified("modified")).in_list(
                 vec![lit("2023-07-05"), lit("2023-07-06"), lit("2023-07-07")],
                 false,
@@ -916,6 +1013,10 @@ mod tests {
 
         let filter = col(Column::new(Some(target_name.clone()), "id"))
             .between(lit("A"), lit("C"))
+            .and(
+                col(Column::new(Some(target_name.clone()), "id"))
+                    .in_list(vec![lit("A"), lit("B"), lit("C")], false),
+            )
             .and(col(Column::new_unqualified("modified")).in_list(
                 vec![
                     col(Column::new(Some(target_name.clone()), "id")),
@@ -988,6 +1089,10 @@ mod tests {
 
         let filter = col(Column::new(Some(target_name.clone()), "id"))
             .between(lit("A"), lit("C"))
+            .and(
+                col(Column::new(Some(target_name.clone()), "id"))
+                    .in_list(vec![lit("A"), lit("B"), lit("C")], false),
+            )
             .and(ident("source.id").in_list(
                 vec![
                     col(Column::new(Some(target_name.clone()), "id")),
@@ -996,6 +1101,89 @@ mod tests {
                 false,
             ));
         assert_eq!(pred.unwrap(), filter);
+    }
+
+    /// The early filter of `source.id = target.id`, for a source with `ids`.
+    async fn early_filter_of(ids: Vec<&str>, max_distinct_values: usize, max_size: usize) -> Expr {
+        let schema = get_arrow_schema(&None);
+        let table = setup_table(Some(vec!["modified"])).await;
+        let rows = ids.len();
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(arrow::array::StringArray::from(ids)),
+                Arc::new(arrow::array::Int32Array::from(vec![10; rows])),
+                Arc::new(arrow::array::StringArray::from(vec!["2023-07-04"; rows])),
+            ],
+        )
+        .unwrap();
+        let config = SessionConfig::new()
+            .set_usize(
+                "datafusion.optimizer.hash_join_inlist_pushdown_max_distinct_values",
+                max_distinct_values,
+            )
+            .set_usize(
+                "datafusion.optimizer.hash_join_inlist_pushdown_max_size",
+                max_size,
+            );
+        let ctx = SessionContext::new_with_config(config);
+        let source_name = TableReference::parse_str("source");
+        let target_name = TableReference::parse_str("target");
+        let source = LogicalPlanBuilder::scan(
+            source_name.clone(),
+            provider_as_source(ctx.read_batch(batch).unwrap().into_view()),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+        try_construct_early_filter(
+            make_join_predicate(&source_name, &target_name),
+            table.snapshot().unwrap().snapshot(),
+            &ctx.state(),
+            &source,
+            &source_name,
+            &target_name,
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_try_construct_early_filter_in_list_limits() {
+        let id = col(Column::new(Some(TableReference::parse_str("target")), "id"));
+        let range = id.clone().between(lit("B"), lit("C"));
+        let in_list = range
+            .clone()
+            .and(id.in_list(vec![lit("B"), lit("C")], false));
+        // Over a limit, the IN list is replaced by `true`, which the simplifier removes. A limit
+        // of 0 disables IN lists.
+        let cases = [
+            (150, 128 * 1024, in_list),
+            (1, 128 * 1024, range.clone().and(lit(true))),
+            (150, 1, range.clone().and(lit(true))),
+            (0, 128 * 1024, range.clone()),
+            (150, 0, range),
+        ];
+
+        for (max_distinct_values, max_size, expected) in cases {
+            let filter = early_filter_of(vec!["B", "C", "B"], max_distinct_values, max_size).await;
+            assert_eq!(
+                filter, expected,
+                "max distinct values {max_distinct_values}, max size {max_size}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_try_construct_early_filter_without_in_list_of_one_value() {
+        // The range of one value is the same filter as its IN list.
+        let id = col(Column::new(Some(TableReference::parse_str("target")), "id"));
+        let filter = early_filter_of(vec!["B", "B"], 150, 128 * 1024).await;
+        assert_eq!(filter, id.between(lit("B"), lit("B")).and(lit(true)));
     }
 
     /// return a join predicate for the source and target tables

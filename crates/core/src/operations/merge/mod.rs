@@ -109,6 +109,7 @@ use crate::{DeltaResult, DeltaTable, DeltaTableError};
 use delta_kernel::table_features::ColumnMappingMode;
 
 mod barrier;
+mod distinct_values;
 mod filter;
 mod source_stats;
 mod validation;
@@ -2356,11 +2357,119 @@ mod tests {
         let parameters = last_commit.operation_parameters.clone().unwrap();
         assert_eq!(
             parameters["predicate"],
-            json!("id >= 'A' AND id <= 'X' AND modified = '2021-02-01'")
+            json!("id >= 'A' AND id <= 'X' AND (id = 'A' OR id = 'X') AND modified = '2021-02-01'")
         );
 
         let actual = get_data(&table).await;
         assert_batches_sorted_eq!(&A_AND_X_UPSERTED, &actual);
+    }
+
+    /// Ten files of ten rows each, with the ids 00000 to 00099 in order.
+    async fn ten_files_by_id(schema: &Arc<ArrowSchema>) -> DeltaTable {
+        let mut table = setup_table(None).await;
+        for file in 0..10 {
+            let ids = (file * 10..file * 10 + 10)
+                .map(|id| format!("{id:05}"))
+                .collect::<Vec<_>>();
+            let batch = source_batch(
+                schema,
+                ids.iter().map(String::as_str).collect(),
+                vec![0; 10],
+                vec!["2021-02-01"; 10],
+            );
+            table = table
+                .write(vec![batch])
+                .with_save_mode(SaveMode::Append)
+                .await
+                .unwrap();
+        }
+        assert_eq!(table.snapshot().unwrap().log_data().num_files(), 10);
+        table
+    }
+
+    /// Updates the ids 00001 and 00098 of [`ten_files_by_id`], in the first and the last file
+    /// (#5120). The source has two distinct ids.
+    async fn update_first_and_last_file(
+        streaming: bool,
+        max_distinct_values: usize,
+    ) -> (DeltaTable, super::MergeMetrics) {
+        let schema = get_arrow_schema(&None);
+        let table = ten_files_by_id(&schema).await;
+        let batch = source_batch(
+            &schema,
+            vec!["00001", "00098"],
+            vec![1, 1],
+            vec!["2021-02-01"; 2],
+        );
+        let source = if streaming {
+            one_shot_source(Arc::clone(&schema), vec![vec![batch]])
+        } else {
+            SessionContext::new().read_batch(batch).unwrap()
+        };
+        let config = source_build_side_session().config().clone().set_usize(
+            "datafusion.optimizer.hash_join_inlist_pushdown_max_distinct_values",
+            max_distinct_values,
+        );
+        table
+            .merge(source, col("target.id").eq(col("source.id")))
+            .with_source_alias("source")
+            .with_target_alias("target")
+            .with_streaming(streaming)
+            .with_session_state(Arc::new(SessionContext::new_with_config(config).state()))
+            .when_matched_update(|update| update.update("value", col("source.value")))
+            .unwrap()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_merge_in_list_skips_files_between_source_keys() {
+        for streaming in [false, true] {
+            let (table, metrics) = update_first_and_last_file(streaming, 150).await;
+
+            // The range of the ids keeps all files, the IN list keeps the first and the last.
+            assert_eq!(metrics.num_target_files_scanned, 2, "streaming {streaming}");
+            assert_eq!(
+                metrics.num_target_files_skipped_during_scan, 8,
+                "streaming {streaming}"
+            );
+            assert_eq!(metrics.num_target_rows_updated, 2);
+            assert_eq!(metrics.num_target_files_removed, 2);
+            let parameters = table
+                .last_commit()
+                .await
+                .unwrap()
+                .operation_parameters
+                .unwrap();
+            assert_eq!(
+                parameters["predicate"],
+                json!("id >= '00001' AND id <= '00098' AND (id = '00001' OR id = '00098')")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_merge_more_source_keys_than_in_list_limit_uses_range() {
+        for streaming in [false, true] {
+            let (table, metrics) = update_first_and_last_file(streaming, 1).await;
+
+            assert_eq!(
+                metrics.num_target_files_scanned, 10,
+                "streaming {streaming}"
+            );
+            assert_eq!(metrics.num_target_rows_updated, 2);
+            assert_eq!(metrics.num_target_files_removed, 2);
+            let parameters = table
+                .last_commit()
+                .await
+                .unwrap()
+                .operation_parameters
+                .unwrap();
+            assert_eq!(
+                parameters["predicate"],
+                json!("id >= '00001' AND id <= '00098'")
+            );
+        }
     }
 
     /// Skipped files must not be opened. The source touches only partition 2021-02-01, so the
@@ -3740,7 +3849,7 @@ mod tests {
             vec![ids.clone(), ids.clone(), ids],
         )
         .unwrap();
-        let filter = super::filter::filter_from_placeholder_values(&term, &items)
+        let filter = super::filter::filter_from_placeholder_values(&term, &items, None)
             .unwrap()
             .unwrap();
 
@@ -6306,7 +6415,7 @@ mod tests {
         let parameters = last_commit.operation_parameters.clone().unwrap();
         assert_eq!(
             parameters["predicate"],
-            "id >= 'B' AND id <= 'C' AND modified = '2021-02-02'"
+            "id >= 'B' AND id <= 'C' AND (id = 'B' OR id = 'C') AND modified = '2021-02-02'"
         );
         assert_eq!(
             parameters["mergePredicate"],
@@ -6624,7 +6733,10 @@ mod tests {
             extra_info["operationMetrics"],
             serde_json::to_value(&metrics).unwrap()
         );
-        assert_eq!(parameters["predicate"], "id >= 'B' AND id <= 'X'");
+        assert_eq!(
+            parameters["predicate"],
+            "id >= 'B' AND id <= 'X' AND (id = 'B' OR id = 'C' OR id = 'X')"
+        );
         assert_eq!(parameters["mergePredicate"], json!("target.id = source.id"));
         assert_eq!(
             parameters["matchedPredicates"],
@@ -7037,7 +7149,9 @@ mod tests {
 
         assert_eq!(
             parameters["predicate"],
-            json!("id >= 'B' AND id <= 'X' AND modified = '2021-02-02'")
+            json!(
+                "id >= 'B' AND id <= 'X' AND (id = 'B' OR id = 'C' OR id = 'X') AND modified = '2021-02-02'"
+            )
         );
 
         let expected = vec![
@@ -7120,7 +7234,9 @@ mod tests {
 
         assert_eq!(
             parameters["predicate"],
-            json!("id >= 'B' AND id <= 'X' AND modified = '2021-02-02'")
+            json!(
+                "id >= 'B' AND id <= 'X' AND (id = 'B' OR id = 'C' OR id = 'X') AND modified = '2021-02-02'"
+            )
         );
 
         let expected = vec![
@@ -7239,6 +7355,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
 
@@ -7272,6 +7389,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
 
@@ -7317,6 +7435,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
 
@@ -7357,6 +7476,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
 
@@ -7388,6 +7508,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
         let expected_filter_l = Expr::Placeholder(Placeholder {
@@ -7422,6 +7543,7 @@ mod tests {
             &target,
             &mut placeholders,
             true,
+            None,
         )
         .unwrap();
 
