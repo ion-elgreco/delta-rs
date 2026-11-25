@@ -11,6 +11,7 @@ use datafusion::physical_plan::{ExecutionPlan, collect_partitioned};
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use deltalake_core::delta_datafusion::DeltaScanConfig;
 use deltalake_core::delta_datafusion::DeltaScanNext;
+use deltalake_core::delta_datafusion::DeltaSessionContext;
 use deltalake_core::delta_datafusion::create_session;
 use deltalake_core::delta_datafusion::engine::DataFusionEngine;
 use deltalake_core::kernel::Snapshot;
@@ -309,6 +310,65 @@ async fn test_multi_partitioned() -> TestResult<()> {
     let n_rows = batches.iter().map(|b| b.num_rows()).sum::<usize>();
     assert_eq!(n_rows, 1);
 
+    Ok(())
+}
+
+/// Hash joins on the dictionary-encoded partition values, with the IN-list pushdown of the default
+/// session. With DataFusion 52, a join on more than one dictionary key panicked when it built the
+/// IN list (apache/datafusion#20437).
+#[tokio::test]
+async fn test_join_on_partition_values_with_in_list_pushdown() -> TestResult<()> {
+    for pushdown_filters in ["false", "true"] {
+        let overrides = std::collections::HashMap::from([(
+            "datafusion.execution.parquet.pushdown_filters".to_string(),
+            pushdown_filters.to_string(),
+        )]);
+        let session = DeltaSessionContext::new_with_session_overrides(&overrides)?.into_inner();
+        let options = session.state().config_options().clone();
+        assert!(
+            options
+                .optimizer
+                .hash_join_inlist_pushdown_max_distinct_values
+                > 0
+        );
+        assert!(options.optimizer.hash_join_inlist_pushdown_max_size > 0);
+
+        let snapshot = scan_dat_with_session("multi_partitioned", &session).await?;
+        let provider = DeltaScanNext::builder().with_snapshot(snapshot).await?;
+        session.register_table("a", Arc::clone(&provider))?;
+        session.register_table("b", provider)?;
+
+        let both_rows = vec![
+            "+--------+--------+",
+            "| letter | number |",
+            "+--------+--------+",
+            "| /%20%f | 6      |",
+            "| b      | 7      |",
+            "+--------+--------+",
+        ];
+        for sql in [
+            "SELECT a.letter, b.number FROM a JOIN b ON a.letter = b.letter",
+            "SELECT a.letter, b.number FROM a JOIN b \
+             ON a.letter = b.letter AND a.date = b.date AND a.number = b.number",
+        ] {
+            let batches = session.sql(sql).await?.collect().await?;
+            assert_batches_sorted_eq!(&both_rows, &batches);
+        }
+
+        let batches = session
+            .sql("SELECT a.number FROM a JOIN (VALUES ('b')) AS v(letter) ON a.letter = v.letter")
+            .await?
+            .collect()
+            .await?;
+        let expected = vec![
+            "+--------+",
+            "| number |",
+            "+--------+",
+            "| 7      |",
+            "+--------+",
+        ];
+        assert_batches_sorted_eq!(&expected, &batches);
+    }
     Ok(())
 }
 
